@@ -4,7 +4,6 @@ __pycache__/
 .env
 .ipynb_checkpoints/
 data/
-models/
 good_models/
-plot/
+18_Chapter 12 Boosting Your Trading Strategy-pages.pdf
 *.feather

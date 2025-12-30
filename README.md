@@ -178,7 +178,7 @@ The pipeline persists intermediate outputs so you can resume after a restart:
 
 When training on multiple symbols, `{symbol}` is `ALL` for the features, predictions, and model directory.
 
-## Alpha Plots
+## Alpha Plot
 
 <figure>
   <img src="plot/ALL_1m_alpha_q5000_longshort_5000_date.png" alt="ALL 1m alpha factor (q5000 longshort, date scope)" width="700">

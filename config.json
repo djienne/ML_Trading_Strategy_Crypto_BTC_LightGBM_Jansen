@@ -1,5 +1,5 @@
 {
-    "candle_interval": "1m",
+    "candle_interval": "5m",
     "request_delay": 0.3,
     "train_symbols": ["BTCUSDT", "XRPUSDT"],
     "inference_symbol": "BTCUSDT",
@@ -15,6 +15,7 @@
         "rsi": true,
         "stochrsi": true,
         "stoch": true,
-        "natr": true
+        "natr": true,
+        "alpha054": true
     }
 }

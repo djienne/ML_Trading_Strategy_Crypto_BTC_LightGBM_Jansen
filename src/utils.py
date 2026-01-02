@@ -63,6 +63,7 @@ def resolve_feature_flags(config):
         "stochrsi": True,
         "stoch": True,
         "natr": True,
+        "alpha001": True,
         "alpha054": True,
     }
     flags = dict(defaults)

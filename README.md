@@ -82,6 +82,7 @@ Feature flags example:
     "stochrsi": true,
     "stoch": true,
     "natr": true,
+    "alpha001": true,
     "alpha054": true
   }
 }

@@ -188,6 +188,28 @@ def engineer_features(df, interval="1m", bar_type="time", feature_flags=None):
             .div(denom_alpha054)
         )
 
+    if feature_flags.get("alpha001", True):
+        r = data["ret1bar"]
+        std_r = (
+            r.groupby(symbol_key)
+            .rolling(window=20, min_periods=20)
+            .std()
+            .reset_index(level=0, drop=True)
+        )
+        c_adj = close.where(r >= 0, std_r)
+        powered = c_adj.pow(2)
+        argmax = (
+            powered.groupby(symbol_key)
+            .rolling(window=5, min_periods=5)
+            .apply(lambda x: float(np.argmax(x) + 1), raw=True)
+            .reset_index(level=0, drop=True)
+        )
+        if isinstance(data.index, pd.MultiIndex):
+            ranked = argmax.groupby(level=-1).rank(pct=True)
+        else:
+            ranked = argmax.rank(pct=True)
+        data["alpha001"] = ranked.sub(0.5)
+
     return data
 
 

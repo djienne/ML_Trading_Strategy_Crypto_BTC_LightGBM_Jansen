@@ -99,9 +99,10 @@ def train_and_predict(
         num_leaves=16,
         min_data_in_leaf=100,
         feature_fraction=0.5,
-        learning_rate=0.15,
+        learning_rate=0.01,
         verbose=-1,
         seed=42,
+        num_threads=6,
     )
     num_boost_round = boost_rounds
 

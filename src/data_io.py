@@ -21,7 +21,14 @@ def normalize_index_names(df):
 def save_frame(df, path):
     df = normalize_index_names(df)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    df.reset_index().to_feather(path)
+    tmp = path + ".tmp"
+    try:
+        df.reset_index().to_feather(tmp)
+        os.replace(tmp, path)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
 
 
 def load_frame(path):
@@ -67,7 +74,15 @@ def load_data(data_dir, symbol, interval):
     partition_files = list_partition_files(data_dir, symbol, interval)
     if partition_files:
         print(f"{symbol} {interval}: loading {len(partition_files)} monthly partitions...")
-        frames = [pd.read_feather(path) for path in partition_files]
+        frames = []
+        for path in partition_files:
+            try:
+                frames.append(pd.read_feather(path))
+            except Exception as exc:
+                print(f"Warning: skipping corrupted partition {path}: {exc}")
+        if not frames:
+            print(f"{symbol} {interval}: all partitions corrupted or empty.")
+            return None
         df = pd.concat(frames, ignore_index=True)
     else:
         file_path = os.path.join(data_dir, f"{symbol}_{interval}.feather")

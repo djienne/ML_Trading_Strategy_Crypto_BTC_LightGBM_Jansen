@@ -1,0 +1,63 @@
+networks:
+  default:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.99.99.0/24
+
+services:
+  freqtrade:
+    build:
+      context: .
+      dockerfile: Dockerfile.freqtrade
+    restart: unless-stopped
+    container_name: lgbm_trader
+    volumes:
+      - ./user_data:/freqtrade/user_data
+      - ./shared:/freqtrade/shared
+      - ../src:/freqtrade/src:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: '1G'
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/v1/ping || exit 1"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    command: >
+      trade
+      --logfile /freqtrade/user_data/logs/freqtrade.log
+      --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
+      --config /freqtrade/user_data/config.json
+      --config /freqtrade/user_data/config-private.json
+      -v
+      --strategy LightGBMStrategy
+
+  retrainer:
+    build:
+      context: .
+      dockerfile: Dockerfile.retrainer
+    restart: unless-stopped
+    container_name: lgbm_retrainer
+    volumes:
+      - ./shared:/app/shared
+      - ../src:/app/src:ro
+      - ../download_data.py:/app/download_data.py:ro
+      - ../data/feather:/app/shared/data/feather
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: '4G'
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import os,sys,time; f='/app/shared/models/latest_model.txt.tmp'; sys.exit(1 if os.path.exists(f) and time.time()-os.path.getmtime(f)>1800 else 0)\""]
+      interval: 300s
+      timeout: 10s
+      retries: 2
+      start_period: 600s
+    command: python /app/retrain.py

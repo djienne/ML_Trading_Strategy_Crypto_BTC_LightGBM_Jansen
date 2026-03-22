@@ -51,34 +51,41 @@ def main():
     eval_parser = subparsers.add_parser("evaluate", help="Evaluate predictions by quantile")
     eval_parser.add_argument("--symbol", help="Override symbol")
     eval_parser.add_argument("--interval", help="Override interval")
-    eval_parser.add_argument("--bins", type=int, default=10, help="Number of quantiles")
+    eval_parser.add_argument("--bins", type=int, default=150, help="Number of quantiles")
     eval_parser.add_argument(
         "--quantile-scope",
-        choices=["auto", "timestamp", "date", "global"],
+        choices=["auto", "timestamp", "date", "global", "expanding"],
         default="auto",
-        help="How to assign quantiles (auto uses timestamp for multi-symbol, date for single-symbol)",
+        help="How to assign quantiles (auto uses expanding for single-symbol, timestamp for multi-symbol)",
     )
 
     backtest_parser = subparsers.add_parser("backtest", help="Backtest signals by quantile")
     backtest_parser.add_argument("--symbol", help="Override symbol")
     backtest_parser.add_argument("--interval", help="Override interval")
-    backtest_parser.add_argument("--bins", type=int, default=10, help="Number of quantiles")
+    backtest_parser.add_argument("--bins", type=int, default=150, help="Number of quantiles")
     backtest_parser.add_argument(
         "--quantile",
         type=int,
-        help="Quantile threshold (long uses >=, short uses <=)",
+        default=150,
+        help="Entry quantile threshold (long uses ==). Default 150 = top bin with 150 bins.",
+    )
+    backtest_parser.add_argument(
+        "--exit-quantile",
+        type=int,
+        default=138,
+        help="Exit quantile threshold (exit long when <). Default 138 = drops below top 8%% with 150 bins.",
     )
     backtest_parser.add_argument(
         "--side",
         choices=["auto", "long", "short", "longshort"],
-        default="auto",
+        default="long",
     )
-    backtest_parser.add_argument("--fee", type=float, default=0.001)
+    backtest_parser.add_argument("--fee", type=float, default=0.0005)
     backtest_parser.add_argument(
         "--quantile-scope",
-        choices=["auto", "timestamp", "date", "global"],
+        choices=["auto", "timestamp", "date", "global", "expanding"],
         default="auto",
-        help="How to assign quantiles (auto uses timestamp for multi-symbol, date for single-symbol)",
+        help="How to assign quantiles (auto uses expanding for single-symbol, timestamp for multi-symbol)",
     )
 
     args = parser.parse_args()
@@ -162,6 +169,7 @@ def main():
             interval,
             bins=args.bins,
             quantile=args.quantile,
+            exit_quantile=args.exit_quantile,
             side=args.side,
             fee=args.fee,
             quantile_scope=args.quantile_scope,

@@ -1,0 +1,9 @@
+FROM freqtradeorg/freqtrade:2025.7
+
+USER root
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+USER ftuser
+
+RUN pip3 install --no-cache-dir lightgbm scipy

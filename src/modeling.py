@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from src.utils import estimate_bar_minutes, get_symbol_key, interval_to_minutes
+from src.utils import get_symbol_key, get_time_index
 
 
 def ic_lgbm(preds, train_data):
@@ -15,16 +15,66 @@ def ic_lgbm(preds, train_data):
     return "ic", ic, True
 
 
+def _calendar_month_splits(timestamps, train_months=12, embargo=20):
+    """Generate rolling splits aligned to calendar month boundaries.
+
+    Each fold:
+      - train: 12 calendar months ending on the last day of month M-1
+      - test:  all bars in calendar month M, skipping the first *embargo*
+               bars to prevent feature rolling-window overlap with
+               training data
+
+    Example (train_months=12):
+      Fold 1: train Jan 2020 – Dec 2020, test Jan 2021 (after embargo)
+      Fold 2: train Feb 2020 – Jan 2021, test Feb 2021 (after embargo)
+      ...
+
+    Returns list of (train_mask, test_mask) boolean arrays.
+    """
+    months = timestamps.to_period("M")
+    unique_months = months.unique().sort_values()
+
+    # Need at least train_months + 1 months of data
+    if len(unique_months) < train_months + 1:
+        return []
+
+    splits = []
+    for i in range(train_months, len(unique_months)):
+        test_month = unique_months[i]
+        train_start_month = unique_months[i - train_months]
+        train_end_month = unique_months[i - 1]
+
+        train_mask = (months >= train_start_month) & (months <= train_end_month)
+        test_mask_raw = months == test_month
+
+        # Apply embargo: skip first N bars of test month to avoid
+        # feature rolling-window overlap with training data.
+        if embargo > 0:
+            test_indices = np.where(test_mask_raw)[0]
+            if len(test_indices) > embargo:
+                test_mask = np.zeros(len(timestamps), dtype=bool)
+                test_mask[test_indices[embargo:]] = True
+            else:
+                continue  # test month too short after embargo
+        else:
+            test_mask = test_mask_raw
+
+        if train_mask.sum() > 0 and test_mask.sum() > 0:
+            splits.append((train_mask, test_mask))
+
+    return splits
+
+
 def train_and_predict(
     data,
     interval="1m",
     bar_type="time",
     model_dir=None,
     resume=False,
-    boost_rounds=250,
+    boost_rounds=5000,
     continue_rounds=50,
 ):
-    print("Starting model training (rolling window)...")
+    print("Starting model training (calendar-month rolling window)...")
     data = data.sort_index()
 
     target_col = "fwd1bar"
@@ -42,88 +92,75 @@ def train_and_predict(
     else:
         print("Training mode: fresh models per fold.")
 
-    # Parameters from the notebook (adjusted for CPU)
     params = dict(
         objective="regression",
         metric=["rmse"],
         device="cpu",
         num_leaves=16,
-        min_data_in_leaf=500,
-        feature_fraction=0.8,
+        min_data_in_leaf=100,
+        feature_fraction=0.5,
+        learning_rate=0.15,
         verbose=-1,
         seed=42,
     )
     num_boost_round = boost_rounds
 
-    # Rolling window setup: Train 12 months, Test 1 month (24/7 crypto).
-    if bar_type == "volume":
-        interval_minutes = estimate_bar_minutes(data.index) or interval_to_minutes(interval)
-    else:
-        interval_minutes = interval_to_minutes(interval)
-    bars_per_day = 1440 / interval_minutes
-    month = 30
-    train_len = max(1, int(round(12 * month * bars_per_day)))
-    test_len = max(1, int(round(month * bars_per_day)))
-    lookahead = 1
+    # Build calendar-month splits: 12-month train, 1-month test
+    timestamps = pd.to_datetime(get_time_index(data.index))
+    splits = _calendar_month_splits(timestamps, train_months=12)
 
-    total_rows = len(data)
-    min_required = train_len + test_len + lookahead
-    if total_rows < min_required:
+    if not splits:
         print("Warning: Insufficient data for 12-month train + 1-month test.")
-        print(f"Data length: {total_rows}, Required: {min_required}")
-        print("Adjusting split to 80% train / 20% test for demonstration.")
+        print("Need at least 13 calendar months of data.")
+        return pd.DataFrame()
 
-        split_idx = int(total_rows * 0.8)
-        train_idx = np.arange(0, split_idx)
-        test_start = split_idx + lookahead
-        if test_start >= total_rows:
-            test_start = split_idx
-        test_idx = np.arange(test_start, total_rows)
-
-        splits = [(train_idx, test_idx)] if len(test_idx) else []
-    else:
-        splits = []
-        step = test_len
-        max_start = total_rows - (train_len + lookahead + test_len)
-        for start in range(0, max_start + 1, step):
-            train_start = start
-            train_end = train_start + train_len
-            test_start = train_end + lookahead
-            test_end = test_start + test_len
-            splits.append((np.arange(train_start, train_end), np.arange(test_start, test_end)))
-
-    print(
-        f"Rolling window: train={train_len} rows, test={test_len} rows, "
-        f"lookahead={lookahead}."
-    )
-    print(f"Generated {len(splits)} splits.")
+    print(f"Generated {len(splits)} calendar-month folds.")
 
     all_predictions = []
 
-    for fold, (train_idx, test_idx) in enumerate(splits):
-        print(f"Processing Fold {fold + 1}/{len(splits)}...")
+    for fold, (train_mask, test_mask) in enumerate(splits):
+        fold_num = fold + 1
+        train_ts = timestamps[train_mask]
+        test_ts = timestamps[test_mask]
+        print(
+            f"Fold {fold_num}/{len(splits)}: "
+            f"train {train_ts.min().strftime('%Y-%m-%d')} -> "
+            f"{train_ts.max().strftime('%Y-%m-%d')} ({train_mask.sum()} rows), "
+            f"test {test_ts.min().strftime('%Y-%m')} ({test_mask.sum()} rows)"
+        )
 
-        X_train = data.iloc[train_idx][feature_cols]
-        y_train = data.iloc[train_idx][target_col]
-        X_test = data.iloc[test_idx][feature_cols]
-        y_test = data.iloc[test_idx][target_col]
+        train_data_fold = data.iloc[np.where(train_mask)[0]]
+        test_data_fold = data.iloc[np.where(test_mask)[0]]
+
+        # Reserve last 10% of training data as validation for early stopping
+        n_train = len(train_data_fold)
+        n_val = max(1, int(n_train * 0.1))
+        actual_train = train_data_fold.iloc[:-n_val]
+        val_data = train_data_fold.iloc[-n_val:]
+
+        X_train = actual_train[feature_cols]
+        y_train = actual_train[target_col]
+        X_val = val_data[feature_cols]
+        y_val = val_data[target_col]
+        X_test = test_data_fold[feature_cols]
+        y_test = test_data_fold[target_col]
 
         lgb_train = lgb.Dataset(X_train, y_train)
-        lgb_eval = lgb.Dataset(X_test, y_test, reference=lgb_train)
+        lgb_eval = lgb.Dataset(X_val, y_val, reference=lgb_train)
 
         callbacks = [lgb.early_stopping(stopping_rounds=50, verbose=False)]
         init_model = None
         if resume and model_dir:
-            init_path = os.path.join(model_dir, f"fold_{fold + 1:02d}.txt")
+            init_path = os.path.join(model_dir, f"fold_{fold_num:02d}.txt")
             if os.path.exists(init_path):
                 init_model = init_path
-                print(f"  Fold {fold + 1}: resuming from {init_path} (+{continue_rounds} rounds)")
+                print(f"  Fold {fold_num}: resuming from {init_path} (+{continue_rounds} rounds)")
 
-        boost_rounds = continue_rounds if init_model else num_boost_round
+        rounds = continue_rounds if init_model else num_boost_round
         model = lgb.train(
             params,
             lgb_train,
-            num_boost_round=boost_rounds,
+            num_boost_round=rounds,
             valid_sets=[lgb_train, lgb_eval],
             feval=ic_lgbm,
             callbacks=callbacks,
@@ -132,7 +169,7 @@ def train_and_predict(
 
         if model_dir:
             os.makedirs(model_dir, exist_ok=True)
-            model_path = os.path.join(model_dir, f"fold_{fold + 1:02d}.txt")
+            model_path = os.path.join(model_dir, f"fold_{fold_num:02d}.txt")
             model.save_model(model_path)
 
         best_iter = model.best_iteration or model.current_iteration()
@@ -144,7 +181,7 @@ def train_and_predict(
         ic, _ = spearmanr(y_test, preds)
         if np.isnan(ic):
             ic = 0.0
-        print(f"  Fold {fold + 1} IC: {ic:.4f}")
+        print(f"  Fold {fold_num} IC: {ic:.4f} (best_iter={best_iter})")
 
     if not all_predictions:
         return pd.DataFrame()

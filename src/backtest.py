@@ -7,6 +7,44 @@ import pandas as pd
 from src.evaluation import add_quantile_labels
 from src.utils import estimate_bar_minutes, get_symbol_key, interval_to_minutes, resolve_quantile_scope
 
+try:
+    from numba import njit as _njit
+except ImportError:
+    def _njit(fn=None, **kwargs):
+        if fn is not None:
+            return fn
+        return lambda f: f
+
+
+@_njit(cache=True)
+def _hysteresis_signal(q_values, entry_q, exit_q, is_grace=None, is_month_end=None):
+    """Numba-accelerated hysteresis signal loop with monthly boundaries.
+
+    If is_grace/is_month_end boolean arrays are provided, enforces:
+    - is_grace: no new entries (hold existing position at 0)
+    - is_month_end: force close any open position
+    """
+    n = len(q_values)
+    out = np.zeros(n, dtype=np.int64)
+    pos = 0
+    for i in range(n):
+        # Force close on last bar of month
+        if is_month_end is not None and is_month_end[i] and pos == 1:
+            pos = 0
+
+        # Grace period: don't open new positions
+        if is_grace is not None and is_grace[i]:
+            out[i] = pos
+            continue
+
+        val = q_values[i]
+        if pos == 0 and val >= entry_q:
+            pos = 1
+        elif pos == 1 and val < exit_q:
+            pos = 0
+        out[i] = pos
+    return out
+
 ALPHA_WINDOW_DAYS = 1
 ALPHA_MIN_PERIODS_MINUTES = 60
 ALPHA_SCALE = 0.01
@@ -98,6 +136,7 @@ def backtest(
     fee=0.001,
     bins=10,
     target_quantile=None,
+    exit_quantile=None,
     side="auto",
     quantile_scope="auto",
     interval="1m",
@@ -153,6 +192,17 @@ def backtest(
     if target_quantile is None:
         predictions.loc[predictions["quantile"] == bins, "signal"] = 1
         predictions.loc[predictions["quantile"] == 1, "signal"] = -1
+    elif exit_quantile is not None and resolved_side == "long":
+        # Hysteresis: enter long when quantile >= target_quantile,
+        # stay long until quantile < exit_quantile.
+        # Monthly boundaries: no entries first hour of month, force close last bar.
+        q = predictions["quantile"].values.astype(np.int64)
+        ts = pd.to_datetime(predictions["timestamp"])
+        is_grace = ((ts.dt.day == 1) & (ts.dt.hour == 0)).values
+        is_month_end = (ts + pd.Timedelta(interval)).dt.month.values != ts.dt.month.values
+        predictions["signal"] = _hysteresis_signal(
+            q, target_quantile, exit_quantile, is_grace, is_month_end,
+        )
     else:
         if resolved_side == "long":
             predictions.loc[predictions["quantile"] >= target_quantile, "signal"] = 1

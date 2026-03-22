@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-from src.utils import get_date_key, get_symbol_key, interval_to_minutes
+from src.utils import expanding_pct_rank, get_date_key, get_symbol_key, interval_to_minutes
 
 
 def _resolve_group_key(index, interval, bar_type):
@@ -207,7 +207,7 @@ def engineer_features(df, interval="1m", bar_type="time", feature_flags=None):
         if isinstance(data.index, pd.MultiIndex):
             ranked = argmax.groupby(level=-1).rank(pct=True)
         else:
-            ranked = argmax.rank(pct=True)
+            ranked = expanding_pct_rank(argmax, min_periods=20)
         data["alpha001"] = ranked.sub(0.5)
 
     return data

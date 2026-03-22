@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import spearmanr
 
-from src.utils import assign_decile, get_symbol_key, get_time_index, resolve_quantile_scope
+from src.utils import assign_decile, assign_decile_expanding, get_symbol_key, get_time_index, resolve_quantile_scope
 
 
 def add_quantile_labels(predictions, bins=10, scope="auto", interval=None, bar_type=None):
@@ -27,6 +27,15 @@ def add_quantile_labels(predictions, bins=10, scope="auto", interval=None, bar_t
     scope = resolve_quantile_scope(scope, symbol_count, interval=interval, bar_type=bar_type)
     if scope == "global":
         predictions["quantile"] = assign_decile(predictions["prediction"], bins=bins)
+        return predictions.sort_values(["symbol", "timestamp"])
+
+    if scope == "expanding":
+        predictions = predictions.sort_values(["symbol", "timestamp"])
+        predictions["quantile"] = predictions.groupby("symbol", sort=False)["prediction"].transform(
+            lambda x: assign_decile_expanding(x, bins=bins)
+        )
+        predictions = predictions.dropna(subset=["quantile"])
+        predictions["quantile"] = predictions["quantile"].astype(int)
         return predictions.sort_values(["symbol", "timestamp"])
 
     if scope == "date":

@@ -1,0 +1,14 @@
+{
+    "exchange": {
+        "walletAddress": "0xYOUR_WALLET_ADDRESS",
+        "privateKey": "0xYOUR_PRIVATE_KEY",
+        "ccxt_config": {
+            "enableRateLimit": true,
+            "rateLimit": 500
+        },
+        "ccxt_async_config": {
+            "enableRateLimit": true,
+            "rateLimit": 500
+        }
+    }
+}

@@ -1,7 +1,10 @@
 {
-    "candle_interval": "5m",
+    "candle_interval": "15m",
     "request_delay": 0.3,
-    "train_symbols": ["BTCUSDT", "XRPUSDT"],
+    "train_symbols": [
+        "BTCUSDT",
+        "ETHUSDT"
+    ],
     "inference_symbol": "BTCUSDT",
     "start_date": "2018-01-01",
     "feather_dir": "data/feather",

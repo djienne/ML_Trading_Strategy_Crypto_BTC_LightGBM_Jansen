@@ -276,7 +276,7 @@ class LightGBMStrategy(IStrategy):
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Exit long when quantile < 138 (drops below top 8%).
+        # Exit long when quantile < 170 (drops below top 15%).
         dataframe.loc[
             dataframe["quantile"] < self.EXIT_QUANTILE,
             "exit_long",

@@ -45,6 +45,89 @@ def _hysteresis_signal(q_values, entry_q, exit_q, is_grace=None, is_month_end=No
         out[i] = pos
     return out
 
+@_njit(cache=True)
+def _hysteresis_signal_low(q_values, entry_q, exit_q, is_grace=None, is_month_end=None):
+    """Buy at bottom bin, exit when rises above exit_q. With monthly boundaries."""
+    n = len(q_values)
+    out = np.zeros(n, dtype=np.int64)
+    pos = 0
+    for i in range(n):
+        if is_month_end is not None and is_month_end[i] and pos == 1:
+            pos = 0
+        if is_grace is not None and is_grace[i]:
+            out[i] = pos
+            continue
+        val = q_values[i]
+        if pos == 0 and val <= entry_q:
+            pos = 1
+        elif pos == 1 and val > exit_q:
+            pos = 0
+        out[i] = pos
+    return out
+
+
+def compute_signal_returns(pred_series, target_series, timestamps,
+                           bins, entry_q, exit_q, interval, fee,
+                           direction="high"):
+    """Compute long-only hysteresis returns with monthly boundaries.
+
+    This is the single shared function used by both the backtest CLI
+    and grid search scripts to ensure identical signal computation.
+
+    Parameters
+    ----------
+    pred_series : array-like of predictions (float)
+    target_series : array-like of targets (float)
+    timestamps : DatetimeIndex or array of timestamps
+    bins : int — number of quantile bins
+    entry_q : int — entry quantile threshold (>= for high, <= for low)
+    exit_q : int — exit quantile threshold (< for high, > for low)
+    interval : str — candle interval (e.g. "15m") for month-end detection
+    fee : float — fee per trade
+    direction : "high" or "low"
+
+    Returns
+    -------
+    dict with: trades, gross, net, sharpe
+    """
+    from src.utils import assign_decile_expanding
+
+    quantiles = assign_decile_expanding(
+        pd.Series(pred_series, index=timestamps) if not isinstance(pred_series, pd.Series) else pred_series,
+        bins=bins,
+    )
+    valid = quantiles.notna()
+    valid_mask = valid.values if hasattr(valid, 'values') else np.asarray(valid)
+    q_arr = quantiles[valid].values.astype(np.int64)
+    t_arr = np.asarray(target_series)[valid_mask]
+
+    ts_all = pd.DatetimeIndex(timestamps)
+    ts_valid = ts_all[valid_mask]
+    is_grace = np.array((ts_valid.day == 1) & (ts_valid.hour == 0))
+    is_month_end = np.array((ts_valid + pd.Timedelta(interval)).month != ts_valid.month)
+
+    if direction == "high":
+        sig = _hysteresis_signal(q_arr, entry_q, exit_q, is_grace, is_month_end)
+    else:
+        sig = _hysteresis_signal_low(q_arr, entry_q, exit_q, is_grace, is_month_end)
+
+    gross = sig * t_arr
+    prev = np.empty_like(sig)
+    prev[0] = 0
+    prev[1:] = sig[:-1]
+    tc = np.abs(sig - prev)
+    net = gross - tc * fee
+
+    total_trades = int(tc.sum())
+    total_gross = float(np.prod(1 + gross) - 1)
+    total_net = float(np.prod(1 + net) - 1)
+    ns = float(net.std())
+    bars_per_year = 525600 / interval_to_minutes(interval)
+    sharpe = float(net.mean() / ns * bars_per_year ** 0.5) if ns > 0 else 0.0
+
+    return dict(trades=total_trades, gross=total_gross, net=total_net, sharpe=sharpe)
+
+
 ALPHA_WINDOW_DAYS = 1
 ALPHA_MIN_PERIODS_MINUTES = 60
 ALPHA_SCALE = 0.01

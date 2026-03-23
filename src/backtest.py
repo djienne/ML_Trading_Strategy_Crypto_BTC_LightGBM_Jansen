@@ -88,14 +88,12 @@ def compute_signal_returns(pred_series, target_series, timestamps,
 
     Returns
     -------
-    dict with: trades, gross, net, sharpe
+    dict with: trades, gross, net, sharpe, valid_mask, signal, quantiles
     """
     from src.utils import assign_decile_expanding
 
-    quantiles = assign_decile_expanding(
-        pd.Series(pred_series, index=timestamps) if not isinstance(pred_series, pd.Series) else pred_series,
-        bins=bins,
-    )
+    pred_s = pd.Series(pred_series, index=timestamps) if not isinstance(pred_series, pd.Series) else pred_series
+    quantiles = assign_decile_expanding(pred_s, bins=bins)
     valid = quantiles.notna()
     valid_mask = valid.values if hasattr(valid, 'values') else np.asarray(valid)
     q_arr = quantiles[valid].values.astype(np.int64)
@@ -125,7 +123,8 @@ def compute_signal_returns(pred_series, target_series, timestamps,
     bars_per_year = 525600 / interval_to_minutes(interval)
     sharpe = float(net.mean() / ns * bars_per_year ** 0.5) if ns > 0 else 0.0
 
-    return dict(trades=total_trades, gross=total_gross, net=total_net, sharpe=sharpe)
+    return dict(trades=total_trades, gross=total_gross, net=total_net, sharpe=sharpe,
+                valid_mask=valid_mask, signal=sig, quantiles=quantiles)
 
 
 ALPHA_WINDOW_DAYS = 1
@@ -276,16 +275,15 @@ def backtest(
         predictions.loc[predictions["quantile"] == bins, "signal"] = 1
         predictions.loc[predictions["quantile"] == 1, "signal"] = -1
     elif exit_quantile is not None and resolved_side == "long":
-        # Hysteresis: enter long when quantile >= target_quantile,
-        # stay long until quantile < exit_quantile.
-        # Monthly boundaries: no entries first hour of month, force close last bar.
-        q = predictions["quantile"].values.astype(np.int64)
+        # Use shared compute_signal_returns() — same code path as grid search.
         ts = pd.to_datetime(predictions["timestamp"])
-        is_grace = ((ts.dt.day == 1) & (ts.dt.hour == 0)).values
-        is_month_end = (ts + pd.Timedelta(interval)).dt.month.values != ts.dt.month.values
-        predictions["signal"] = _hysteresis_signal(
-            q, target_quantile, exit_quantile, is_grace, is_month_end,
+        r = compute_signal_returns(
+            predictions["prediction"], predictions["target"], ts,
+            bins, target_quantile, exit_quantile, interval, fee,
+            direction="high",
         )
+        predictions.loc[r["valid_mask"], "signal"] = r["signal"]
+        predictions["quantile"] = r["quantiles"].values
     else:
         if resolved_side == "long":
             predictions.loc[predictions["quantile"] >= target_quantile, "signal"] = 1

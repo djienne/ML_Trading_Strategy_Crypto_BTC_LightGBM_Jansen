@@ -98,7 +98,7 @@ def train_and_predict(
         device="cpu",
         num_leaves=16,
         min_data_in_leaf=100,
-        feature_fraction=0.5,
+        feature_fraction=0.8,
         learning_rate=0.01,
         verbose=-1,
         seed=42,

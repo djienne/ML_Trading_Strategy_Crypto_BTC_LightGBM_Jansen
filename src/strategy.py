@@ -51,7 +51,7 @@ def main():
     eval_parser = subparsers.add_parser("evaluate", help="Evaluate predictions by quantile")
     eval_parser.add_argument("--symbol", help="Override symbol")
     eval_parser.add_argument("--interval", help="Override interval")
-    eval_parser.add_argument("--bins", type=int, default=150, help="Number of quantiles")
+    eval_parser.add_argument("--bins", type=int, default=200, help="Number of quantiles")
     eval_parser.add_argument(
         "--quantile-scope",
         choices=["auto", "timestamp", "date", "global", "expanding"],
@@ -62,18 +62,18 @@ def main():
     backtest_parser = subparsers.add_parser("backtest", help="Backtest signals by quantile")
     backtest_parser.add_argument("--symbol", help="Override symbol")
     backtest_parser.add_argument("--interval", help="Override interval")
-    backtest_parser.add_argument("--bins", type=int, default=150, help="Number of quantiles")
+    backtest_parser.add_argument("--bins", type=int, default=200, help="Number of quantiles")
     backtest_parser.add_argument(
         "--quantile",
         type=int,
-        default=150,
-        help="Entry quantile threshold (long uses ==). Default 150 = top bin with 150 bins.",
+        default=200,
+        help="Entry quantile threshold (long uses >=). Default 200 = top bin with 200 bins.",
     )
     backtest_parser.add_argument(
         "--exit-quantile",
         type=int,
-        default=138,
-        help="Exit quantile threshold (exit long when <). Default 138 = drops below top 8%% with 150 bins.",
+        default=170,
+        help="Exit quantile threshold (exit long when <). Default 170 = drops below top 15%% with 200 bins.",
     )
     backtest_parser.add_argument(
         "--side",

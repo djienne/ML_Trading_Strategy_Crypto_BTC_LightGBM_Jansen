@@ -49,13 +49,13 @@ class LightGBMStrategy(IStrategy):
     MODEL_INFO_PATH = "/freqtrade/shared/models/model_info.json"
     PRED_HISTORY_PATH = "/freqtrade/shared/models/latest_predictions.feather"
 
-    # Quantile signal parameters (bins=150).
-    # Entry: top bin (quantile == 150, top 0.67%)
-    # Exit:  quantile < 138 (drops below top 8%)
-    # Backtest: +166% net, 642 trades, Sharpe 1.41 over 5 years
-    BINS = 150
-    ENTRY_QUANTILE = 150   # top bin
-    EXIT_QUANTILE = 138    # exit when drops below top 8% (150 * 0.92)
+    # Quantile signal parameters (bins=200).
+    # Entry: top bin (quantile >= 200, top 0.5%)
+    # Exit:  quantile < 170 (drops below top 15%)
+    # Backtest: +207% net, 596 trades, Sharpe 1.65 over 5 years
+    BINS = 200
+    ENTRY_QUANTILE = 200   # top bin
+    EXIT_QUANTILE = 170    # exit when drops below top 15% (200 * 0.85)
 
     # ---- internal state ----
     _model = None
@@ -265,11 +265,12 @@ class LightGBMStrategy(IStrategy):
     # ------------------------------------------------------------------
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Enter long when quantile == top bin (150 out of 150).
+        # Enter long when quantile >= ENTRY_QUANTILE (top bin).
+        # Matches backtest's _hysteresis_signal: val >= entry_q.
         # Grace period: no entries during first hour of month (model retraining).
         is_grace = (dataframe["date"].dt.day == 1) & (dataframe["date"].dt.hour == 0)
         dataframe.loc[
-            (dataframe["quantile"] == self.ENTRY_QUANTILE) & ~is_grace,
+            (dataframe["quantile"] >= self.ENTRY_QUANTILE) & ~is_grace,
             "enter_long",
         ] = 1
         return dataframe

@@ -1,6 +1,6 @@
 {
     "max_open_trades": 1,
-    "stake_currency": "USDC",
+    "stake_currency": "USDT",
     "stake_amount": "unlimited",
     "tradable_balance_ratio": 0.99,
     "dry_run": true,
@@ -15,19 +15,19 @@
         "unit": "seconds"
     },
     "entry_pricing": {
-        "price_side": "other",
+        "price_side": "same",
         "use_order_book": true,
-        "order_book_top": 5
+        "order_book_top": 1
     },
     "exit_pricing": {
-        "price_side": "other",
+        "price_side": "same",
         "use_order_book": true,
-        "order_book_top": 5
+        "order_book_top": 1
     },
     "exchange": {
-        "name": "hyperliquid",
+        "name": "binance",
         "pair_whitelist": [
-            "BTC/USDC:USDC"
+            "BTC/USDT:USDT"
         ],
         "pair_blacklist": []
     },
@@ -47,10 +47,10 @@
         "listen_port": 8080,
         "verbosity": "info",
         "enable_openapi": false,
-        "jwt_secret_key": "CHANGE_ME_TO_A_RANDOM_SECRET",
+        "jwt_secret_key": "GENERATE_A_RANDOM_SECRET_BEFORE_DEPLOYING",
         "CORS_origins": [],
         "username": "freqtrader",
-        "password": "CHANGE_ME"
+        "password": "SET_A_REAL_PASSWORD_BEFORE_DEPLOYING"
     },
     "bot_name": "LightGBM_BTC",
     "initial_state": "running",

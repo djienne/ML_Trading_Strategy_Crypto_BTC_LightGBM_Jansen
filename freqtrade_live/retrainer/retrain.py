@@ -33,8 +33,9 @@ from scipy.stats import spearmanr
 sys.path.insert(0, "/app")
 
 from src.features import engineer_features, prepare_target
-from src.data_io import load_data, load_data_multi, save_frame
+from src.data_io import load_data, load_data_multi, save_frame, select_symbol
 from src.modeling import train_and_predict
+from src.utils import get_time_index
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -62,8 +63,13 @@ MODEL_INFO_PATH = os.path.join(MODEL_DIR, "model_info.json")
 PREDICTIONS_PATH = os.path.join(MODEL_DIR, "latest_predictions.feather")
 DOWNLOAD_CONFIG_PATH = "/app/_download_config.json"
 
-# Must match src/modeling.py defaults exactly for reproducibility.
+# Model hyperparams — must match the deployed grid search winner.
 BOOST_ROUNDS = 5000
+TRAIN_MONTHS = 12
+NUM_LEAVES = 16
+MIN_DATA_IN_LEAF = 100
+FEATURE_FRACTION = 0.5
+LEARNING_RATE = 0.01
 MIN_TRAINING_ROWS = 10_000
 
 # All features enabled (must match config.json feature_flags).
@@ -197,6 +203,25 @@ def validate_training_data(model_data):
             )
             return False
 
+    # Check per-symbol data freshness
+    max_staleness_days = 3
+    ts = pd.to_datetime(get_time_index(model_data.index))
+    now = pd.Timestamp.now(tz="UTC")
+    for sym in TRAIN_SYMBOLS:
+        sym_data = select_symbol(model_data, sym)
+        if sym_data.empty:
+            logger.error("Validation failed: no data for %s.", sym)
+            return False
+        sym_ts = pd.to_datetime(get_time_index(sym_data.index))
+        latest = sym_ts.max()
+        age_days = (now - pd.Timestamp(latest, tz="UTC")).days
+        if age_days > max_staleness_days:
+            logger.error(
+                "Validation failed: %s data is %d days old (max %d).",
+                sym, age_days, max_staleness_days,
+            )
+            return False
+
     logger.info("Data validation passed (%d rows, %d features).", len(model_data), len(feature_cols))
     return True
 
@@ -204,15 +229,18 @@ def validate_training_data(model_data):
 def train_model(model_data):
     """Train using the SAME rolling-CV code as the backtest.
 
-    Calls src/modeling.train_and_predict() which uses:
-      - 12-month train / 1-month test rolling window
-      - 90/10 train/val split within each fold
-      - early stopping at 50 rounds, max 250 rounds
+    Calls src/modeling.train_and_predict() with params from module constants:
+      - TRAIN_MONTHS-month train / 1-month test rolling window
+      - 90/10 train/val split within each fold (sorted by time)
+      - early stopping at 50 rounds, max BOOST_ROUNDS rounds
+      - Per-symbol embargo of 20 bars
       - seed=42 for reproducibility
-      - lookahead=20
 
-    The last fold's model is used as the live model.
+    The last fold's model is deployed as the live model.
     """
+    # Clear old folds to prevent stale models from being promoted
+    if os.path.isdir(FOLD_DIR):
+        shutil.rmtree(FOLD_DIR)
     os.makedirs(FOLD_DIR, exist_ok=True)
 
     # Use the exact same function as `python main.py train`
@@ -223,6 +251,11 @@ def train_model(model_data):
         model_dir=FOLD_DIR,
         resume=False,
         boost_rounds=BOOST_ROUNDS,
+        train_months=TRAIN_MONTHS,
+        num_leaves=NUM_LEAVES,
+        min_data_in_leaf=MIN_DATA_IN_LEAF,
+        feature_fraction=FEATURE_FRACTION,
+        learning_rate=LEARNING_RATE,
     )
 
     # Find the last fold model — this is the one trained on the most
@@ -239,13 +272,20 @@ def train_model(model_data):
     feature_names = model.feature_name()
     best_iter = model.best_iteration if model.best_iteration else model.current_iteration()
 
-    # Compute validation IC for the last fold's predictions
+    # Compute overall IC and last fold's validation IC
     if not predictions.empty and "target" in predictions.columns and "prediction" in predictions.columns:
         val_ic = spearmanr(predictions["target"], predictions["prediction"])[0]
         if np.isnan(val_ic):
             val_ic = 0.0
     else:
         val_ic = 0.0
+
+    # Last fold's val_ic — used by live strategy for IC filtering
+    last_fold_val_ic = 0.0
+    if not predictions.empty and "val_ic" in predictions.columns:
+        last_fold_val_ic = float(predictions["val_ic"].iloc[-1])
+        if np.isnan(last_fold_val_ic):
+            last_fold_val_ic = 0.0
 
     logger.info(
         "Rolling CV complete: %d folds. Using last fold (%s) as live model. "
@@ -256,14 +296,55 @@ def train_model(model_data):
         val_ic,
     )
 
-    return last_fold_path, feature_names, val_ic, best_iter, last_fold_num, predictions
+    return last_fold_path, feature_names, val_ic, last_fold_val_ic, best_iter, last_fold_num, predictions
 
 
-def save_model(last_fold_path, feature_names, val_ic, best_iter, num_folds, predictions):
-    """Copy last fold model as latest_model.txt and save metadata."""
+def save_model(last_fold_path, feature_names, val_ic, last_fold_val_ic, best_iter, num_folds, predictions):
+    """Copy last fold model as latest_model.txt and save metadata.
+
+    Order matters: predictions and metadata are saved BEFORE the model file,
+    because the live strategy triggers a reload when latest_model.txt changes.
+    Predictions must already be on disk when that reload happens.
+    """
     os.makedirs(MODEL_DIR, exist_ok=True)
 
-    # Atomic copy: last fold -> latest_model.txt
+    # 1. Save predictions FIRST (before model triggers strategy reload)
+    if predictions is not None and not predictions.empty:
+        try:
+            save_frame(predictions, PREDICTIONS_PATH)
+            logger.info("Saved predictions -> %s", PREDICTIONS_PATH)
+        except Exception:
+            logger.exception("Failed to save predictions — aborting model publish.")
+            raise
+
+    # 2. Metadata (atomic)
+    info = {
+        "training_date": datetime.now(timezone.utc).isoformat(),
+        "train_symbols": TRAIN_SYMBOLS,
+        "inference_symbol": INFERENCE_SYMBOL,
+        "interval": INTERVAL,
+        "feature_names": feature_names,
+        "best_iteration": best_iter,
+        "overall_ic": float(val_ic),
+        "last_fold_val_ic": float(last_fold_val_ic),
+        "num_folds": num_folds,
+        "last_fold_file": os.path.basename(last_fold_path),
+        "boost_rounds": BOOST_ROUNDS,
+        "train_months": TRAIN_MONTHS,
+        "feature_flags": FEATURE_FLAGS,
+        "training_method": "rolling_cv (src/modeling.train_and_predict)",
+    }
+    tmp_info = MODEL_INFO_PATH + ".tmp"
+    try:
+        with open(tmp_info, "w") as fh:
+            json.dump(info, fh, indent=2)
+        os.replace(tmp_info, MODEL_INFO_PATH)
+    except Exception:
+        if os.path.exists(tmp_info):
+            os.remove(tmp_info)
+        raise
+
+    # 3. Model file LAST — this triggers strategy reload via mtime check
     tmp = MODEL_PATH + ".tmp"
     try:
         shutil.copy2(last_fold_path, tmp)
@@ -281,39 +362,7 @@ def save_model(last_fold_path, feature_names, val_ic, best_iter, num_folds, pred
     except Exception:
         logger.exception("Post-save check: saved model file is unreadable!")
 
-    # Save predictions for later comparison with backtest
-    if predictions is not None and not predictions.empty:
-        try:
-            save_frame(predictions, PREDICTIONS_PATH)
-            logger.info("Saved predictions -> %s", PREDICTIONS_PATH)
-        except Exception:
-            logger.exception("Failed to save predictions.")
-
-    # Metadata (atomic)
-    info = {
-        "training_date": datetime.now(timezone.utc).isoformat(),
-        "train_symbols": TRAIN_SYMBOLS,
-        "inference_symbol": INFERENCE_SYMBOL,
-        "interval": INTERVAL,
-        "feature_names": feature_names,
-        "best_iteration": best_iter,
-        "overall_ic": float(val_ic),
-        "num_folds": num_folds,
-        "last_fold_file": os.path.basename(last_fold_path),
-        "boost_rounds": BOOST_ROUNDS,
-        "training_method": "rolling_cv (src/modeling.train_and_predict)",
-    }
-    tmp_info = MODEL_INFO_PATH + ".tmp"
-    try:
-        with open(tmp_info, "w") as fh:
-            json.dump(info, fh, indent=2)
-        os.replace(tmp_info, MODEL_INFO_PATH)
-    except Exception:
-        if os.path.exists(tmp_info):
-            os.remove(tmp_info)
-        raise
-
-    logger.info("Saved model -> %s  info -> %s", MODEL_PATH, MODEL_INFO_PATH)
+    logger.info("Saved predictions -> model -> info: %s", MODEL_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -330,8 +379,8 @@ def run_pipeline():
             logger.error("Data validation failed. Keeping existing model.")
             return False
 
-        last_fold, feats, ic, best, n_folds, preds = train_model(data)
-        save_model(last_fold, feats, ic, best, n_folds, preds)
+        last_fold, feats, ic, last_ic, best, n_folds, preds = train_model(data)
+        save_model(last_fold, feats, ic, last_ic, best, n_folds, preds)
         return True
     except Exception:
         logger.exception("Training pipeline failed.")

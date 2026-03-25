@@ -47,6 +47,11 @@ def main():
         default=50,
         help="Additional boosting rounds when resuming existing models",
     )
+    train_parser.add_argument("--train-months", type=int, default=12, help="Rolling training window in months")
+    train_parser.add_argument("--num-leaves", type=int, default=16)
+    train_parser.add_argument("--min-data-in-leaf", type=int, default=100)
+    train_parser.add_argument("--feature-fraction", type=float, default=0.5)
+    train_parser.add_argument("--learning-rate", type=float, default=0.01)
 
     eval_parser = subparsers.add_parser("evaluate", help="Evaluate predictions by quantile")
     eval_parser.add_argument("--symbol", help="Override symbol")
@@ -66,21 +71,26 @@ def main():
     backtest_parser.add_argument(
         "--quantile",
         type=int,
-        default=200,
-        help="Entry quantile threshold (long uses >=). Default 200 = top bin with 200 bins.",
+        default=198,
+        help="Entry quantile threshold (long uses >=). Default 198 = top 1%% with 200 bins.",
     )
     backtest_parser.add_argument(
         "--exit-quantile",
         type=int,
-        default=170,
-        help="Exit quantile threshold (exit long when <). Default 170 = drops below top 15%% with 200 bins.",
+        default=180,
+        help="Exit quantile threshold (exit long when <). Default 180 = drops below top 10%% with 200 bins.",
     )
     backtest_parser.add_argument(
         "--side",
         choices=["auto", "long", "short", "longshort"],
         default="long",
     )
-    backtest_parser.add_argument("--fee", type=float, default=0.0005)
+    backtest_parser.add_argument("--fee", type=float, default=0.0005,
+                                     help="One-way fee per trade (entry and exit each, default 0.05%%)")
+    backtest_parser.add_argument("--stoploss", type=float, default=-0.20,
+                                     help="Stoploss per trade (e.g. -0.20 = close if trade loses 20%%)")
+    backtest_parser.add_argument("--ic-thresh", type=float, default=None,
+                                     help="Skip bars where validation IC < threshold (e.g. 0.0)")
     backtest_parser.add_argument(
         "--quantile-scope",
         choices=["auto", "timestamp", "date", "global", "expanding"],
@@ -153,6 +163,11 @@ def main():
             retrain=args.retrain,
             boost_rounds=args.boost_rounds,
             continue_rounds=args.continue_rounds,
+            train_months=args.train_months,
+            num_leaves=args.num_leaves,
+            min_data_in_leaf=args.min_data_in_leaf,
+            feature_fraction=args.feature_fraction,
+            learning_rate=args.learning_rate,
         )
     elif args.command == "evaluate":
         run_evaluate(
@@ -173,6 +188,8 @@ def main():
             side=args.side,
             fee=args.fee,
             quantile_scope=args.quantile_scope,
+            stoploss=args.stoploss,
+            ic_thresh=args.ic_thresh,
         )
     else:
         parser.print_help()

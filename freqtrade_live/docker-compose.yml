@@ -18,11 +18,8 @@ services:
       - ../src:/freqtrade/src:ro
     ports:
       - "127.0.0.1:8080:8080"
-    deploy:
-      resources:
-        limits:
-          cpus: '1.0'
-          memory: '1G'
+    mem_limit: 1g
+    cpus: 1.0
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/v1/ping || exit 1"]
       interval: 60s
@@ -34,7 +31,6 @@ services:
       --logfile /freqtrade/user_data/logs/freqtrade.log
       --db-url sqlite:////freqtrade/user_data/tradesv3.sqlite
       --config /freqtrade/user_data/config.json
-      --config /freqtrade/user_data/config-private.json
       -v
       --strategy LightGBMStrategy
 
@@ -49,11 +45,8 @@ services:
       - ../src:/app/src:ro
       - ../download_data.py:/app/download_data.py:ro
       - ../data/feather:/app/shared/data/feather
-    deploy:
-      resources:
-        limits:
-          cpus: '2.0'
-          memory: '4G'
+    mem_limit: 4g
+    cpus: 2.0
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import os,sys,time; f='/app/shared/models/latest_model.txt.tmp'; sys.exit(1 if os.path.exists(f) and time.time()-os.path.getmtime(f)>1800 else 0)\""]
       interval: 300s

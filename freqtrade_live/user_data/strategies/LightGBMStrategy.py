@@ -26,7 +26,7 @@ _TMP_STALE_SECONDS = 300
 
 class LightGBMStrategy(IStrategy):
     """
-    LightGBM long-only strategy for BTC/USDC:USDC on Hyperliquid.
+    LightGBM long-only strategy for BTC/USDT:USDT on Binance Futures.
 
     Designed to produce signals identical to the backtest by:
     - Using the same model with the same best_iteration for predictions
@@ -38,10 +38,10 @@ class LightGBMStrategy(IStrategy):
     INTERFACE_VERSION = 3
 
     timeframe = "15m"
-    startup_candle_count = 100  # feature warmup only; quantile history from file
+    startup_candle_count = 20  # feature warmup (ret10bar needs 9, RSI needs 14); quantile context from prediction history file
 
     can_short = False  # long-only
-    stoploss = -0.10
+    stoploss = -0.20  # wide safety net; backtest exits via signals only
     minimal_roi = {"0": 100}  # exits via signals only
 
     # Paths inside the container (mapped from shared/ volume)
@@ -50,18 +50,20 @@ class LightGBMStrategy(IStrategy):
     PRED_HISTORY_PATH = "/freqtrade/shared/models/latest_predictions.feather"
 
     # Quantile signal parameters (bins=200).
-    # Entry: top bin (quantile >= 200, top 0.5%)
-    # Exit:  quantile < 170 (drops below top 15%)
-    # Backtest: +207% net, 596 trades, Sharpe 1.65 over 5 years
+    # Entry: quantile >= 198 (top 1%)
+    # Exit:  quantile < 180 (drops below top 10%)
+    # Must match backtest: --bins 200 --quantile 198 --exit-quantile 180
     BINS = 200
-    ENTRY_QUANTILE = 200   # top bin
-    EXIT_QUANTILE = 170    # exit when drops below top 15% (200 * 0.85)
+    ENTRY_QUANTILE = 198   # top 1% (99th percentile)
+    EXIT_QUANTILE = 180    # exit when drops below top 10% (200 * 0.90)
+    IC_THRESH = 0.0        # disable signals if last fold's val_ic < this
 
     # ---- internal state ----
     _model = None
     _model_mtime = 0.0
     _feature_names = None
     _best_iteration = None  # from model_info.json — matches backtest
+    _feature_flags = None   # from model_info.json — ensures feature parity
     _no_model_warned = False
     _pred_history = None  # DatetimeIndex Series of historical predictions
 
@@ -116,13 +118,41 @@ class LightGBMStrategy(IStrategy):
                 logger.error("Model has no feature names; skipping.")
                 return
 
-            # Load best_iteration from model_info.json to match backtest.
-            best_iter = self._load_best_iteration()
+            # Validate model metadata (interval, symbol) before accepting.
+            model_info = self._load_model_info()
+            if model_info:
+                model_interval = model_info.get("interval")
+                if model_interval and model_interval != self.timeframe:
+                    logger.error(
+                        "Model interval %s != strategy timeframe %s — rejecting.",
+                        model_interval, self.timeframe,
+                    )
+                    return
+                model_symbol = model_info.get("inference_symbol")
+                if model_symbol and model_symbol != "BTCUSDT":
+                    logger.error(
+                        "Model inference_symbol %s != BTCUSDT — rejecting.",
+                        model_symbol,
+                    )
+                    return
+                # IC filter: reject model if last fold's validation IC is too low
+                last_ic = model_info.get("last_fold_val_ic")
+                if last_ic is not None and self.IC_THRESH is not None:
+                    if float(last_ic) < self.IC_THRESH:
+                        logger.warning(
+                            "Model last_fold_val_ic=%.4f < IC_THRESH=%.4f — signals disabled.",
+                            float(last_ic), self.IC_THRESH,
+                        )
+                        return
+
+            best_iter = model_info.get("best_iteration") if model_info else None
+            if best_iter is not None:
+                best_iter = int(best_iter)
 
             self._model = model
             self._feature_names = names
             self._best_iteration = best_iter
-            self._model_mtime = mtime
+            self._feature_flags = model_info.get("feature_flags") if model_info else None
             self._no_model_warned = False
             logger.info(
                 "Loaded model (mtime %s, %d features, best_iter=%s)",
@@ -131,25 +161,24 @@ class LightGBMStrategy(IStrategy):
                 best_iter,
             )
             self._load_prediction_history()
+            # Only latch mtime after EVERYTHING succeeds (model + history).
+            # If history load disabled the model, don't latch — allow retry.
+            if self._model is not None:
+                self._model_mtime = mtime
+            else:
+                logger.warning("Model disabled by history check — will retry on next loop.")
         except Exception:
             logger.exception("Failed to load model — keeping previous")
 
-    def _load_best_iteration(self):
-        """Read best_iteration from model_info.json.
-
-        The backtest uses model.predict(X, num_iteration=best_iter).
-        We must do the same to get identical predictions.
-        """
+    def _load_model_info(self):
+        """Load full model_info.json dict for validation and best_iteration."""
         if not os.path.exists(self.MODEL_INFO_PATH):
             return None
         try:
             with open(self.MODEL_INFO_PATH) as fh:
-                info = json.load(fh)
-            best = info.get("best_iteration")
-            if best is not None:
-                return int(best)
+                return json.load(fh)
         except Exception:
-            logger.exception("Could not read best_iteration from model_info.json")
+            logger.exception("Could not read model_info.json")
         return None
 
     def _load_prediction_history(self):
@@ -161,27 +190,31 @@ class LightGBMStrategy(IStrategy):
         live predictions.
         """
         if not os.path.exists(self.PRED_HISTORY_PATH):
-            logger.warning(
-                "No prediction history at %s — quantile will use live data only.",
+            logger.error(
+                "No prediction history at %s — signals DISABLED until model reload.",
                 self.PRED_HISTORY_PATH,
             )
             self._pred_history = None
+            self._model = None  # disable signals — live-only quantiles are unreliable
             return
 
         try:
             hist = load_frame(self.PRED_HISTORY_PATH)
             if "prediction" not in hist.columns:
-                logger.warning("Prediction history has no 'prediction' column.")
+                logger.error("Prediction history has no 'prediction' column — signals DISABLED.")
                 self._pred_history = None
+                self._model = None
                 return
 
             pred = hist["prediction"]
 
-            # Flatten MultiIndex to DatetimeIndex if needed.
-            # The backtest produces MultiIndex(symbol, timestamp).
-            # The live strategy predicts with a plain DatetimeIndex.
-            # Both must use the same index type for pd.concat to work.
+            # Filter to inference symbol (BTCUSDT) and flatten to DatetimeIndex.
+            # The backtest produces MultiIndex(symbol, timestamp) with BTC+ETH.
+            # We must filter to BTC only — mixing symbols would contaminate
+            # the expanding quantile distribution.
             if isinstance(pred.index, pd.MultiIndex):
+                symbol_level = pred.index.get_level_values("symbol")
+                pred = pred[symbol_level == "BTCUSDT"]
                 pred = pred.droplevel("symbol").sort_index()
 
             self._pred_history = pred
@@ -224,13 +257,18 @@ class LightGBMStrategy(IStrategy):
             df_indexed,
             interval="15m",
             bar_type="time",
+            feature_flags=self._feature_flags,
         )
 
         # Build prediction matrix in model's expected column order.
         model_features = self._feature_names
-        X = pd.DataFrame(index=features_df.index)
-        for col in model_features:
-            X[col] = features_df[col] if col in features_df.columns else np.nan
+        missing = [c for c in model_features if c not in features_df.columns]
+        if missing:
+            raise ValueError(
+                f"Feature schema mismatch: model expects {missing} "
+                f"but engineer_features() did not produce them."
+            )
+        X = features_df[model_features]
 
         # Use best_iteration to match backtest predictions exactly.
         # The backtest does: model.predict(X_test, num_iteration=best_iter)
@@ -248,7 +286,13 @@ class LightGBMStrategy(IStrategy):
         # match the backtest exactly.
         if self._pred_history is not None:
             earliest = pred_series.index.min()
-            hist = self._pred_history[self._pred_history.index < earliest]
+            # Normalize timezone: history is tz-naive, live data may be tz-aware
+            hist_idx = self._pred_history.index
+            if earliest.tzinfo is not None and hist_idx.tzinfo is None:
+                hist_idx = hist_idx.tz_localize(earliest.tzinfo)
+            elif earliest.tzinfo is None and hist_idx.tzinfo is not None:
+                hist_idx = hist_idx.tz_localize(None)
+            hist = self._pred_history[hist_idx < earliest]
             combined = pd.concat([hist, pred_series])
             quantiles_full = assign_decile_expanding(combined, bins=self.BINS)
             quantiles = quantiles_full.reindex(pred_series.index)
@@ -265,18 +309,23 @@ class LightGBMStrategy(IStrategy):
     # ------------------------------------------------------------------
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Enter long when quantile >= ENTRY_QUANTILE (top bin).
+        # Enter long when quantile >= ENTRY_QUANTILE.
         # Matches backtest's _hysteresis_signal: val >= entry_q.
-        # Grace period: no entries during first hour of month (model retraining).
+        # Blocked during: grace period (first hour of month) and month-end bars.
+        # Month-end block matches backtest's `continue` after forced close.
         is_grace = (dataframe["date"].dt.day == 1) & (dataframe["date"].dt.hour == 0)
+        is_month_end = (
+            (dataframe["date"] + pd.Timedelta(self.timeframe)).dt.month
+            != dataframe["date"].dt.month
+        )
         dataframe.loc[
-            (dataframe["quantile"] >= self.ENTRY_QUANTILE) & ~is_grace,
+            (dataframe["quantile"] >= self.ENTRY_QUANTILE) & ~is_grace & ~is_month_end,
             "enter_long",
         ] = 1
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Exit long when quantile < 170 (drops below top 15%).
+        # Exit long when quantile < 180 (drops below top 10%).
         dataframe.loc[
             dataframe["quantile"] < self.EXIT_QUANTILE,
             "exit_long",

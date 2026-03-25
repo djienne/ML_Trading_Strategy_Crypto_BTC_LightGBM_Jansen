@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from src.evaluation import add_quantile_labels
-from src.utils import estimate_bar_minutes, get_symbol_key, interval_to_minutes, resolve_quantile_scope
+from src.utils import estimate_bar_minutes, get_symbol_key, get_time_index, interval_to_minutes, resolve_quantile_scope
 
 try:
     from numba import njit as _njit
@@ -22,15 +22,17 @@ def _hysteresis_signal(q_values, entry_q, exit_q, is_grace=None, is_month_end=No
 
     If is_grace/is_month_end boolean arrays are provided, enforces:
     - is_grace: no new entries (hold existing position at 0)
-    - is_month_end: force close any open position
+    - is_month_end: force close any open position, no re-entry on same bar
     """
     n = len(q_values)
     out = np.zeros(n, dtype=np.int64)
     pos = 0
     for i in range(n):
-        # Force close on last bar of month
+        # Force close on last bar of month — skip entry check on this bar
         if is_month_end is not None and is_month_end[i] and pos == 1:
             pos = 0
+            out[i] = pos
+            continue
 
         # Grace period: don't open new positions
         if is_grace is not None and is_grace[i]:
@@ -54,6 +56,8 @@ def _hysteresis_signal_low(q_values, entry_q, exit_q, is_grace=None, is_month_en
     for i in range(n):
         if is_month_end is not None and is_month_end[i] and pos == 1:
             pos = 0
+            out[i] = pos
+            continue
         if is_grace is not None and is_grace[i]:
             out[i] = pos
             continue
@@ -66,9 +70,49 @@ def _hysteresis_signal_low(q_values, entry_q, exit_q, is_grace=None, is_month_en
     return out
 
 
+@_njit(cache=True)
+def _apply_stoploss(signal, returns, stoploss):
+    """Apply stoploss: cap the breach bar's return, flatten the position.
+
+    Returns (modified_signal, capped_returns, sl_exit_flags).
+    - modified_signal[i] = 0 on breach bar (position closed, exit fee charged)
+    - capped_returns[i] = capped loss on breach bar
+    - sl_exit_flags[i] = 1 on breach bars (so the capped return is still applied
+      even though signal=0)
+    """
+    n = len(signal)
+    out = signal.copy()
+    capped = returns.copy()
+    sl_exit = np.zeros(n, dtype=np.int64)
+    cum_ret = 0.0
+    in_trade = False
+    for i in range(n):
+        if out[i] == 1:
+            if not in_trade:
+                in_trade = True
+                cum_ret = returns[i]
+            else:
+                cum_ret = (1 + cum_ret) * (1 + returns[i]) - 1
+            if cum_ret <= stoploss:
+                # Cap this bar so cumulative hits exactly stoploss
+                cum_prev = (1 + cum_ret) / (1 + returns[i]) - 1
+                if 1 + cum_prev > 1e-12:
+                    capped[i] = (1 + stoploss) / (1 + cum_prev) - 1
+                else:
+                    capped[i] = stoploss
+                out[i] = 0       # FLATTEN — triggers exit fee via tc
+                sl_exit[i] = 1   # mark: capped return still applies
+                in_trade = False
+                cum_ret = 0.0
+        else:
+            in_trade = False
+            cum_ret = 0.0
+    return out, capped, sl_exit
+
+
 def compute_signal_returns(pred_series, target_series, timestamps,
                            bins, entry_q, exit_q, interval, fee,
-                           direction="high"):
+                           direction="high", stoploss=None):
     """Compute long-only hysteresis returns with monthly boundaries.
 
     This is the single shared function used by both the backtest CLI
@@ -109,10 +153,23 @@ def compute_signal_returns(pred_series, target_series, timestamps,
     else:
         sig = _hysteresis_signal_low(q_arr, entry_q, exit_q, is_grace, is_month_end)
 
-    gross = sig * t_arr
+    # Empty signal guard (e.g. all quantiles NaN on tiny dataset)
+    if len(sig) == 0:
+        return dict(trades=0, gross=0.0, net=0.0, sharpe=0.0,
+                    valid_mask=valid_mask, signal=sig, quantiles=quantiles)
+
+    # Apply stoploss if set (e.g. -0.20 = close if trade loses 20%)
+    sl_exit = np.zeros_like(sig)
+    if stoploss is not None and stoploss < 0:
+        sig, t_arr, sl_exit = _apply_stoploss(sig, t_arr, stoploss)
+
+    # Gross returns: normal bars use sig*return, stoploss-exit bars use capped return
+    gross = sig * t_arr + sl_exit * t_arr
     prev = np.empty_like(sig)
     prev[0] = 0
     prev[1:] = sig[:-1]
+    # Transaction costs: stoploss exits show sig=0 (from 1), so tc detects them.
+    # Also count sl_exit bars as having an exit transition if prev was 1.
     tc = np.abs(sig - prev)
     net = gross - tc * fee
 
@@ -124,7 +181,8 @@ def compute_signal_returns(pred_series, target_series, timestamps,
     sharpe = float(net.mean() / ns * bars_per_year ** 0.5) if ns > 0 else 0.0
 
     return dict(trades=total_trades, gross=total_gross, net=total_net, sharpe=sharpe,
-                valid_mask=valid_mask, signal=sig, quantiles=quantiles)
+                valid_mask=valid_mask, signal=sig, quantiles=quantiles,
+                gross_arr=gross, net_arr=net)
 
 
 ALPHA_WINDOW_DAYS = 1
@@ -226,6 +284,8 @@ def backtest(
     plot_path=None,
     plot_label=None,
     alpha_plot_path=None,
+    stoploss=None,
+    ic_thresh=None,
 ):
     print("\nStarting Backtest...")
     if predictions.empty:
@@ -258,34 +318,88 @@ def backtest(
             rule = f"quantile {comparator} {target_quantile} ({resolved_side})"
     print(f"Signal setup: scope={scope_used}, bins={bins}, rule={rule}.")
 
-    predictions = add_quantile_labels(
-        predictions,
-        bins=bins,
-        scope=scope_used,
-        interval=interval,
-        bar_type=bar_type,
-    )
-    if predictions.empty:
-        print("No valid predictions to backtest after dropping NaNs.")
-        return
+    _hysteresis_pnl_done = False
+    if exit_quantile is not None and resolved_side == "long":
+        # Hysteresis path: skip add_quantile_labels() — compute_signal_returns()
+        # handles quantiles internally. This ensures the CLI backtest matches
+        # the grid search exactly (same data, same code path).
+        predictions = predictions.copy()
+        predictions = predictions.dropna(subset=["target", "prediction"])
+        time_index = pd.to_datetime(get_time_index(predictions.index))
+        symbol_index = get_symbol_key(predictions.index)
+        predictions = predictions.reset_index(drop=True)
+        predictions["timestamp"] = time_index
+        predictions["symbol"] = symbol_index
 
-    print("Calculating signal quantiles...")
-    predictions["signal"] = 0
-    if target_quantile is None:
-        predictions.loc[predictions["quantile"] == bins, "signal"] = 1
-        predictions.loc[predictions["quantile"] == 1, "signal"] = -1
-    elif exit_quantile is not None and resolved_side == "long":
-        # Use shared compute_signal_returns() — same code path as grid search.
-        ts = pd.to_datetime(predictions["timestamp"])
+        if predictions.empty:
+            print("No valid predictions to backtest after dropping NaNs.")
+            return
+
+        if scope_used != "expanding":
+            print(f"Note: hysteresis mode uses expanding quantiles (ignoring scope={scope_used}).")
+
+        # IC filter: skip bars where validation IC < threshold (same as grid search)
+        pred_col = predictions["prediction"]
+        target_col = predictions["target"]
+        ts = predictions["timestamp"]
+        if ic_thresh is not None and "val_ic" in predictions.columns:
+            ic_mask = (predictions["val_ic"] >= ic_thresh).values
+            pred_col = pred_col[ic_mask]
+            target_col = target_col[ic_mask]
+            ts = ts[ic_mask]
+            print(f"IC filter (>={ic_thresh}): kept {ic_mask.sum()}/{len(ic_mask)} bars.")
+
         r = compute_signal_returns(
-            predictions["prediction"], predictions["target"], ts,
+            pred_col, target_col, ts,
             bins, target_quantile, exit_quantile, interval, fee,
-            direction="high",
+            direction="high", stoploss=stoploss,
         )
-        predictions.loc[r["valid_mask"], "signal"] = r["signal"]
-        predictions["quantile"] = r["quantiles"].values
+
+        # Map results back — when IC filtering is active, results are on the
+        # filtered subset. Use the filtered index to map back to full predictions.
+        if ic_thresh is not None and "val_ic" in predictions.columns:
+            filtered_idx = predictions.index[ic_mask]
+            valid_in_filtered = r["valid_mask"]
+            valid_full_idx = filtered_idx[valid_in_filtered]
+
+            predictions["signal"] = 0
+            predictions.loc[valid_full_idx, "signal"] = r["signal"]
+            predictions["quantile"] = np.nan
+            predictions.loc[filtered_idx, "quantile"] = r["quantiles"].values
+            predictions["strategy_gross"] = 0.0
+            predictions["strategy_net"] = 0.0
+            predictions.loc[valid_full_idx, "strategy_gross"] = r["gross_arr"]
+            predictions.loc[valid_full_idx, "strategy_net"] = r["net_arr"]
+        else:
+            predictions["signal"] = 0
+            predictions.loc[r["valid_mask"], "signal"] = r["signal"]
+            predictions["quantile"] = r["quantiles"].values
+            predictions["strategy_gross"] = 0.0
+            predictions["strategy_net"] = 0.0
+            predictions.loc[r["valid_mask"], "strategy_gross"] = r["gross_arr"]
+            predictions.loc[r["valid_mask"], "strategy_net"] = r["net_arr"]
+
+        predictions["prev_signal"] = predictions.groupby("symbol")["signal"].shift(1).fillna(0)
+        predictions["trades"] = (predictions["signal"] - predictions["prev_signal"]).abs()
+        predictions["costs"] = predictions["trades"] * fee
+        _hysteresis_pnl_done = True
     else:
-        if resolved_side == "long":
+        # Non-hysteresis paths need add_quantile_labels() for quantile assignment
+        predictions = add_quantile_labels(
+            predictions,
+            bins=bins,
+            scope=scope_used,
+            interval=interval,
+            bar_type=bar_type,
+        )
+        if predictions.empty:
+            print("No valid predictions to backtest after dropping NaNs.")
+            return
+        predictions["signal"] = 0
+        if target_quantile is None:
+            predictions.loc[predictions["quantile"] == bins, "signal"] = 1
+            predictions.loc[predictions["quantile"] == 1, "signal"] = -1
+        elif resolved_side == "long":
             predictions.loc[predictions["quantile"] >= target_quantile, "signal"] = 1
         elif resolved_side == "short":
             predictions.loc[predictions["quantile"] <= target_quantile, "signal"] = -1
@@ -298,13 +412,14 @@ def backtest(
         else:
             raise ValueError(f"Unsupported side: {resolved_side}")
 
-    predictions["strategy_gross"] = predictions["signal"] * predictions["target"]
+    if not _hysteresis_pnl_done:
+        predictions["strategy_gross"] = predictions["signal"] * predictions["target"]
 
-    predictions["prev_signal"] = predictions.groupby("symbol")["signal"].shift(1).fillna(0)
-    predictions["trades"] = (predictions["signal"] - predictions["prev_signal"]).abs()
-    predictions["costs"] = predictions["trades"] * fee
+        predictions["prev_signal"] = predictions.groupby("symbol")["signal"].shift(1).fillna(0)
+        predictions["trades"] = (predictions["signal"] - predictions["prev_signal"]).abs()
+        predictions["costs"] = predictions["trades"] * fee
 
-    predictions["strategy_net"] = predictions["strategy_gross"] - predictions["costs"]
+        predictions["strategy_net"] = predictions["strategy_gross"] - predictions["costs"]
 
     alpha_series = None
     alpha_window, alpha_min_periods, alpha_window_label = resolve_alpha_params(
@@ -344,6 +459,8 @@ def backtest(
     print(f"Backtest Results ({minute_perf.index.min()} to {minute_perf.index.max()})")
     print("-" * 30)
     print(f"Transaction Fee: {fee * 100}%")
+    if stoploss is not None:
+        print(f"Stoploss: {stoploss:.0%}")
     print(f"Total Trades: {int(total_trades)}")
     print(f"Total Gross Return: {total_return_gross:.2%}")
     print(f"Total Net Return:   {total_return_net:.2%}")

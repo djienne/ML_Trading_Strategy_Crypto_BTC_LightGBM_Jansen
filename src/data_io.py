@@ -129,7 +129,8 @@ def select_symbol(predictions, symbol):
     if isinstance(predictions.index, pd.MultiIndex):
         level = predictions.index.get_level_values(0)
         if symbol not in level:
-            print(f"Symbol {symbol} not found in predictions; skipping filter.")
-            return predictions
+            available = list(level.unique())
+            print(f"Warning: symbol {symbol} not found in predictions (available: {available})")
+            return predictions.iloc[0:0]  # empty with same schema
         return predictions.xs(symbol, level=0, drop_level=False)
     return predictions

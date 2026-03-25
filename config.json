@@ -6,7 +6,7 @@
         "ETHUSDT"
     ],
     "inference_symbol": "BTCUSDT",
-    "start_date": "2018-01-01",
+    "start_date": "2020-01-01",
     "feather_dir": "data/feather",
     "binance_base_url": "https://fapi.binance.com",
     "max_klines_per_request": 1500,
@@ -19,6 +19,7 @@
         "stochrsi": true,
         "stoch": true,
         "natr": true,
-        "alpha054": true
+        "alpha054": true,
+        "alpha001": true
     }
 }

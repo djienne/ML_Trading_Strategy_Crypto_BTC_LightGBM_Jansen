@@ -3,3 +3,15 @@ models/
 plot/
 *.feather
 *.pdf
+__pycache__/
+
+# Live deployment artifacts
+freqtrade_live/user_data/logs/
+freqtrade_live/user_data/tradesv3.sqlite
+freqtrade_live/user_data/tradesv3.sqlite-*
+freqtrade_live/user_data/config-private.json
+freqtrade_live/shared/models/
+good_models/
+grid_search_results.csv
+grid_search_output.log
+grid_search_resume.log

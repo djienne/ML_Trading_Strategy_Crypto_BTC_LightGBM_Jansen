@@ -1,3 +1,4 @@
+import gc
 import os
 
 import lightgbm as lgb
@@ -15,26 +16,19 @@ def ic_lgbm(preds, train_data):
     return "ic", ic, True
 
 
-def _calendar_month_splits(timestamps, train_months=12, embargo=20):
+def _calendar_month_splits(timestamps, train_months=12, embargo=20, symbols=None):
     """Generate rolling splits aligned to calendar month boundaries.
 
     Each fold:
-      - train: 12 calendar months ending on the last day of month M-1
+      - train: N calendar months ending on the last day of month M-1
       - test:  all bars in calendar month M, skipping the first *embargo*
-               bars to prevent feature rolling-window overlap with
-               training data
-
-    Example (train_months=12):
-      Fold 1: train Jan 2020 – Dec 2020, test Jan 2021 (after embargo)
-      Fold 2: train Feb 2020 – Jan 2021, test Feb 2021 (after embargo)
-      ...
+               bars **per symbol** to prevent feature rolling-window overlap
 
     Returns list of (train_mask, test_mask) boolean arrays.
     """
     months = timestamps.to_period("M")
     unique_months = months.unique().sort_values()
 
-    # Need at least train_months + 1 months of data
     if len(unique_months) < train_months + 1:
         return []
 
@@ -47,15 +41,23 @@ def _calendar_month_splits(timestamps, train_months=12, embargo=20):
         train_mask = (months >= train_start_month) & (months <= train_end_month)
         test_mask_raw = months == test_month
 
-        # Apply embargo: skip first N bars of test month to avoid
-        # feature rolling-window overlap with training data.
         if embargo > 0:
             test_indices = np.where(test_mask_raw)[0]
-            if len(test_indices) > embargo:
-                test_mask = np.zeros(len(timestamps), dtype=bool)
-                test_mask[test_indices[embargo:]] = True
+            if symbols is not None:
+                # Per-symbol embargo: drop first `embargo` rows for EACH symbol
+                test_syms = symbols[test_indices]
+                keep = np.ones(len(test_indices), dtype=bool)
+                for sym in np.unique(test_syms):
+                    sym_pos = np.where(test_syms == sym)[0]
+                    keep[sym_pos[:embargo]] = False
+                valid_test = test_indices[keep]
             else:
-                continue  # test month too short after embargo
+                # Single symbol: simple slice
+                valid_test = test_indices[embargo:]
+            if len(valid_test) == 0:
+                continue
+            test_mask = np.zeros(len(timestamps), dtype=bool)
+            test_mask[valid_test] = True
         else:
             test_mask = test_mask_raw
 
@@ -73,6 +75,11 @@ def train_and_predict(
     resume=False,
     boost_rounds=5000,
     continue_rounds=50,
+    train_months=12,
+    num_leaves=16,
+    min_data_in_leaf=100,
+    feature_fraction=0.5,
+    learning_rate=0.01,
 ):
     print("Starting model training (calendar-month rolling window)...")
     data = data.sort_index()
@@ -96,23 +103,24 @@ def train_and_predict(
         objective="regression",
         metric=["rmse"],
         device="cpu",
-        num_leaves=16,
-        min_data_in_leaf=100,
-        feature_fraction=0.8,
-        learning_rate=0.01,
+        num_leaves=num_leaves,
+        min_data_in_leaf=min_data_in_leaf,
+        feature_fraction=feature_fraction,
+        learning_rate=learning_rate,
         verbose=-1,
         seed=42,
         num_threads=6,
     )
     num_boost_round = boost_rounds
 
-    # Build calendar-month splits: 12-month train, 1-month test
+    # Build calendar-month splits with per-symbol embargo
     timestamps = pd.to_datetime(get_time_index(data.index))
-    splits = _calendar_month_splits(timestamps, train_months=12)
+    symbols = np.asarray(get_symbol_key(data.index))
+    splits = _calendar_month_splits(timestamps, train_months=train_months, embargo=20, symbols=symbols)
 
     if not splits:
-        print("Warning: Insufficient data for 12-month train + 1-month test.")
-        print("Need at least 13 calendar months of data.")
+        print(f"Warning: Insufficient data for {train_months}-month train + 1-month test.")
+        print(f"Need at least {train_months + 1} calendar months of data.")
         return pd.DataFrame()
 
     print(f"Generated {len(splits)} calendar-month folds.")
@@ -132,6 +140,11 @@ def train_and_predict(
 
         train_data_fold = data.iloc[np.where(train_mask)[0]]
         test_data_fold = data.iloc[np.where(test_mask)[0]]
+
+        # Sort training fold by timestamp so last 10% is the most recent
+        # time slice across all symbols (not biased by symbol order).
+        train_ts_fold = pd.to_datetime(get_time_index(train_data_fold.index))
+        train_data_fold = train_data_fold.iloc[np.argsort(train_ts_fold)]
 
         # Reserve last 10% of training data as validation for early stopping
         n_train = len(train_data_fold)
@@ -174,15 +187,27 @@ def train_and_predict(
             model.save_model(model_path)
 
         best_iter = model.best_iteration or model.current_iteration()
+
+        # Validation IC (used by grid search IC filtering)
+        val_preds_arr = model.predict(X_val, num_iteration=best_iter)
+        val_ic, _ = spearmanr(y_val, val_preds_arr)
+        if np.isnan(val_ic):
+            val_ic = 0.0
+
         preds = model.predict(X_test, num_iteration=best_iter)
 
-        fold_preds = pd.DataFrame({"target": y_test, "prediction": preds}, index=y_test.index)
+        fold_preds = pd.DataFrame(
+            {"target": y_test, "prediction": preds, "val_ic": val_ic},
+            index=y_test.index,
+        )
         all_predictions.append(fold_preds)
 
         ic, _ = spearmanr(y_test, preds)
         if np.isnan(ic):
             ic = 0.0
-        print(f"  Fold {fold_num} IC: {ic:.4f} (best_iter={best_iter})")
+        print(f"  Fold {fold_num} IC: {ic:.4f} val_IC: {val_ic:.4f} (best_iter={best_iter})")
+        del model, lgb_train, lgb_eval
+        gc.collect()
 
     if not all_predictions:
         return pd.DataFrame()

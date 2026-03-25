@@ -1,16 +1,12 @@
 import numpy as np
 import pandas as pd
 
-from src.utils import expanding_pct_rank, get_date_key, get_symbol_key, interval_to_minutes
+from src.utils import expanding_pct_rank, get_symbol_key
 
 
 def _resolve_group_key(index, interval, bar_type):
-    if bar_type == "volume":
-        return get_symbol_key(index)
-    interval_minutes = interval_to_minutes(interval)
-    if interval_minutes < 1440:
-        date_key = get_date_key(index)
-        return [get_symbol_key(index), date_key]
+    # Group by symbol only. Crypto trades 24/7 — no session gaps,
+    # so features and targets should cross midnight boundaries.
     return get_symbol_key(index)
 
 
@@ -70,7 +66,7 @@ def engineer_features(df, interval="1m", bar_type="time", feature_flags=None):
             .mean()
             .reset_index(level=0, drop=True)
         )
-        data["cci"] = (tp - tp_ma).div(0.015 * tp_md)
+        data["cci"] = (tp - tp_ma).div(0.015 * tp_md).clip(-500, 500)
 
     if feature_flags.get("mfi", True):
         tp_diff = tp.groupby(symbol_key).diff()
@@ -186,7 +182,7 @@ def engineer_features(df, interval="1m", bar_type="time", feature_flags=None):
             .mul(open_.pow(5))
             .mul(-1)
             .div(denom_alpha054)
-        )
+        ).clip(-10, 10)
 
     if feature_flags.get("alpha001", True):
         r = data["ret1bar"]

@@ -1,3 +1,4 @@
+import json
 import os
 import shutil
 
@@ -90,12 +91,28 @@ def load_predictions_for_symbol(config, target_symbol, interval):
     return predictions, paths
 
 
-def run_train(config, symbol, interval, paths, retrain=False, boost_rounds=250, continue_rounds=50):
+def run_train(config, symbol, interval, paths, retrain=False, boost_rounds=250, continue_rounds=50,
+              train_months=12, num_leaves=16, min_data_in_leaf=100, feature_fraction=0.5, learning_rate=0.01):
     features_path = paths["features_path"]
     predictions_path = paths["predictions_path"]
     model_dir = paths["model_dir"]
     print(f"Model output: {model_dir}")
     print(f"Predictions output: {predictions_path}")
+
+    # Auto-detect hyperparam changes — force retrain if params differ from last run
+    current_params = dict(train_months=train_months, num_leaves=num_leaves,
+                          min_data_in_leaf=min_data_in_leaf, feature_fraction=feature_fraction,
+                          learning_rate=learning_rate, boost_rounds=boost_rounds)
+    params_path = os.path.join(model_dir, "train_params.json")
+    if not retrain and os.path.exists(params_path):
+        try:
+            with open(params_path) as f:
+                old_params = json.load(f)
+            if old_params != current_params:
+                print(f"Hyperparams changed — forcing retrain.")
+                retrain = True
+        except Exception:
+            pass
 
     if retrain:
         if os.path.exists(predictions_path):
@@ -134,12 +151,21 @@ def run_train(config, symbol, interval, paths, retrain=False, boost_rounds=250, 
         model_dir=model_dir,
         resume=resume,
         continue_rounds=continue_rounds,
+        train_months=train_months,
+        num_leaves=num_leaves,
+        min_data_in_leaf=min_data_in_leaf,
+        feature_fraction=feature_fraction,
+        learning_rate=learning_rate,
     )
     if predictions.empty:
         print("No predictions generated.")
         return predictions
 
     save_frame(predictions, predictions_path)
+    # Save params so we can detect changes on next run
+    os.makedirs(model_dir, exist_ok=True)
+    with open(params_path, "w") as f:
+        json.dump(current_params, f, indent=2)
     print(f"Saved predictions: {predictions_path} ({len(predictions)} rows)")
     return predictions
 
@@ -195,6 +221,8 @@ def run_backtest(
     side="auto",
     fee=0.001,
     quantile_scope="auto",
+    stoploss=None,
+    ic_thresh=None,
 ):
     print(f"Backtest target: {target_symbol}")
     predictions, paths = load_predictions_for_symbol(config, target_symbol, interval)
@@ -234,5 +262,7 @@ def run_backtest(
         bar_type=bar_type,
         plot_path=plot_path,
         plot_label=plot_label,
+        stoploss=stoploss,
+        ic_thresh=ic_thresh,
         alpha_plot_path=alpha_plot_path,
     )

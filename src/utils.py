@@ -145,6 +145,8 @@ def rolling_pct_rank(x, window, min_periods=None):
         min_periods = 1
 
     def _rank_in_window(w):
+        if np.isnan(w[-1]):
+            return np.nan
         return np.sum(w <= w[-1]) / len(w)
 
     result = x.rolling(window, min_periods=min_periods).apply(

@@ -132,6 +132,7 @@ def train_and_predict(
         splits = splits[-1:]
 
     all_predictions = []
+    best_iter = None
 
     for fold, (train_mask, test_mask) in enumerate(splits):
         fold_num = total_folds if last_fold_only else fold + 1

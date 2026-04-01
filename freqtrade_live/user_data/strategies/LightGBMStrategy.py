@@ -300,6 +300,11 @@ class LightGBMStrategy(IStrategy):
                 hist_idx = hist_idx.tz_convert("UTC").tz_localize(None)
             # Only prepend enough history for the rolling window
             hist = self._pred_history[hist_idx < earliest].tail(q_window)
+            if len(hist) < q_window:
+                logger.warning(
+                    "Sparse prediction history: %d bars < %d window; quantiles may be less stable.",
+                    len(hist), q_window,
+                )
             combined = pd.concat([hist, pred_series])
             quantiles_full = assign_decile_rolling(combined, bins=self.BINS, window=q_window)
             quantiles = quantiles_full.reindex(pred_series.index)

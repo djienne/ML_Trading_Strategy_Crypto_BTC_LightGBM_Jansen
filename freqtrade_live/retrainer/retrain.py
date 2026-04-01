@@ -274,7 +274,9 @@ def train_model(model_data, last_fold_only=False):
     # loses early-stopping metadata and returns -1).
     model = lgb.Booster(model_file=last_fold_path)
     feature_names = model.feature_name()
-    best_iter = train_meta.get("last_best_iteration") or model.current_iteration()
+    best_iter = train_meta.get("last_best_iteration")
+    if best_iter is None:
+        best_iter = model.current_iteration()
 
     # Compute overall IC and last fold's validation IC
     if not predictions.empty and "target" in predictions.columns and "prediction" in predictions.columns:
@@ -441,11 +443,16 @@ def main():
 
     cleanup_tmp_files()
 
-    # Always retrain the last fold on startup to pick up code/feature changes.
-    # Only the last fold's model is needed for live trading; existing prediction
-    # history is kept on disk for the expanding quantile.
-    logger.info("Startup retrain (last fold only) ...")
-    if run_startup_retrain():
+    # Always retrain on startup to pick up code/feature changes.
+    # Use fast last-fold-only if prediction history already exists on disk;
+    # otherwise do a full retrain to generate the prediction history file.
+    if os.path.exists(PREDICTIONS_PATH):
+        logger.info("Startup retrain (last fold only) ...")
+        ok = run_startup_retrain()
+    else:
+        logger.info("No prediction history — full retrain required on first startup ...")
+        ok = run_pipeline()
+    if ok:
         last_train_month = datetime.now(timezone.utc).strftime("%Y-%m")
     else:
         logger.error("Startup retrain failed; using existing model if available.")

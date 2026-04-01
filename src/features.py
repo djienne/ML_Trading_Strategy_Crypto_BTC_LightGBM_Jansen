@@ -200,10 +200,9 @@ def engineer_features(df, interval="1m", bar_type="time", feature_flags=None):
             .apply(lambda x: float(np.argmax(x) + 1), raw=True)
             .reset_index(level=0, drop=True)
         )
-        if isinstance(data.index, pd.MultiIndex):
-            ranked = argmax.groupby(level=-1).rank(pct=True)
-        else:
-            ranked = expanding_pct_rank(argmax, min_periods=20)
+        # Always use expanding time-series rank (not cross-sectional) so
+        # training and single-symbol live inference produce identical features.
+        ranked = expanding_pct_rank(argmax, min_periods=20)
         data["alpha001"] = ranked.sub(0.5)
 
     return data

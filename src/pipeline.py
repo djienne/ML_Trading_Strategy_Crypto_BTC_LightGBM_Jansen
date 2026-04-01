@@ -143,7 +143,7 @@ def run_train(config, symbol, interval, paths, retrain=False, boost_rounds=250, 
     model_data = load_frame(features_path)
     resume = bool(existing_models) and not retrain
     bar_type = resolve_bar_type(config)
-    predictions = train_and_predict(
+    predictions, _meta = train_and_predict(
         model_data,
         interval=interval,
         bar_type=bar_type,
@@ -223,6 +223,7 @@ def run_backtest(
     quantile_scope="auto",
     stoploss=None,
     ic_thresh=None,
+    train_months=None,
 ):
     print(f"Backtest target: {target_symbol}")
     predictions, paths = load_predictions_for_symbol(config, target_symbol, interval)
@@ -265,4 +266,5 @@ def run_backtest(
         stoploss=stoploss,
         ic_thresh=ic_thresh,
         alpha_plot_path=alpha_plot_path,
+        train_months=train_months,
     )

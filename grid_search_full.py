@@ -16,6 +16,7 @@ from src.features import engineer_features, prepare_target
 from src.modeling import train_and_predict
 from src.utils import get_time_index, get_symbol_key
 from src.backtest import compute_signal_returns
+from src.utils import interval_to_minutes
 
 # Fixed params
 LR = 0.01
@@ -62,11 +63,14 @@ config_num = 0
 best_overall = {"net": -999}
 
 for train_months in TRAIN_MONTHS_LIST:
+    bars_per_month = int(30.4375 * 24 * 60 / interval_to_minutes(INTERVAL))
+    q_window = bars_per_month * train_months
+
     for leaves, ff, mdil in MODEL_CONFIGS:
         config_num += 1
 
         # Use the SAME training function as the CLI
-        predictions = train_and_predict(
+        predictions, _meta = train_and_predict(
             data,
             interval=INTERVAL,
             bar_type="time",
@@ -119,6 +123,7 @@ for train_months in TRAIN_MONTHS_LIST:
                     r = compute_signal_returns(
                         filtered_preds, filtered_targets, filtered_ts,
                         bins, entry_q, exit_q, INTERVAL, FEE, direction="high", stoploss=STOPLOSS,
+                        quantile_window=q_window,
                     )
                     row = dict(tm=train_months, leaves=leaves, ff=ff, mdil=mdil,
                                direction="high", bins=bins, entry_pct=entry_pct,
@@ -137,6 +142,7 @@ for train_months in TRAIN_MONTHS_LIST:
                     r = compute_signal_returns(
                         filtered_preds, filtered_targets, filtered_ts,
                         bins, entry_low, exit_q, INTERVAL, FEE, direction="low", stoploss=STOPLOSS,
+                        quantile_window=q_window,
                     )
                     row = dict(tm=train_months, leaves=leaves, ff=ff, mdil=mdil,
                                direction="low", bins=bins, entry_pct=entry_low,

@@ -16,7 +16,7 @@ from pandas import DataFrame
 sys.path.insert(0, "/freqtrade")
 
 from src.features import engineer_features
-from src.utils import assign_decile_expanding
+from src.utils import assign_decile_rolling, interval_to_minutes
 from src.data_io import load_frame
 
 logger = logging.getLogger(__name__)
@@ -38,10 +38,13 @@ class LightGBMStrategy(IStrategy):
     INTERFACE_VERSION = 3
 
     timeframe = "15m"
-    startup_candle_count = 20  # feature warmup (ret10bar needs 9, RSI needs 14); quantile context from prediction history file
+    startup_candle_count = 50  # feature warmup margin (RSI/CCI need 14, alpha001 needs 20)
 
     can_short = False  # long-only
-    stoploss = -0.20  # wide safety net; backtest exits via signals only
+    # Note: Freqtrade stoploss uses real-time unrealized P&L from entry price.
+    # The backtest stoploss tracks cumulative geometric return since entry.
+    # At 1x leverage these are very similar but not identical.
+    stoploss = -0.20
     minimal_roi = {"0": 100}  # exits via signals only
 
     # Paths inside the container (mapped from shared/ volume)
@@ -56,6 +59,7 @@ class LightGBMStrategy(IStrategy):
     BINS = 200
     ENTRY_QUANTILE = 198   # top 1% (99th percentile)
     EXIT_QUANTILE = 180    # exit when drops below top 10% (200 * 0.90)
+    TRAIN_MONTHS = 12      # must match retrainer; used for rolling quantile window
     IC_THRESH = 0.0        # disable signals if last fold's val_ic < this
 
     # ---- internal state ----
@@ -281,23 +285,26 @@ class LightGBMStrategy(IStrategy):
 
         pred_series = pd.Series(predictions, index=features_df.index)
 
-        # Expanding quantile with full historical context.
-        # Prepend prediction history from rolling CV so quantile values
-        # match the backtest exactly.
+        # Rolling quantile: rank each prediction against the last
+        # TRAIN_MONTHS worth of predictions, matching the backtest.
+        bars_per_month = int(30.4375 * 24 * 60 / interval_to_minutes(self.timeframe))
+        q_window = bars_per_month * self.TRAIN_MONTHS
+
         if self._pred_history is not None:
             earliest = pred_series.index.min()
-            # Normalize timezone: history is tz-naive, live data may be tz-aware
+            # Normalize both sides to naive UTC for reliable comparison.
+            if earliest.tzinfo is not None:
+                earliest = earliest.tz_convert("UTC").tz_localize(None)
             hist_idx = self._pred_history.index
-            if earliest.tzinfo is not None and hist_idx.tzinfo is None:
-                hist_idx = hist_idx.tz_localize(earliest.tzinfo)
-            elif earliest.tzinfo is None and hist_idx.tzinfo is not None:
-                hist_idx = hist_idx.tz_localize(None)
-            hist = self._pred_history[hist_idx < earliest]
+            if hist_idx.tzinfo is not None:
+                hist_idx = hist_idx.tz_convert("UTC").tz_localize(None)
+            # Only prepend enough history for the rolling window
+            hist = self._pred_history[hist_idx < earliest].tail(q_window)
             combined = pd.concat([hist, pred_series])
-            quantiles_full = assign_decile_expanding(combined, bins=self.BINS)
+            quantiles_full = assign_decile_rolling(combined, bins=self.BINS, window=q_window)
             quantiles = quantiles_full.reindex(pred_series.index)
         else:
-            quantiles = assign_decile_expanding(pred_series, bins=self.BINS)
+            quantiles = assign_decile_rolling(pred_series, bins=self.BINS, window=q_window)
 
         dataframe["prediction"] = pred_series.reindex(df_indexed.index).values
         dataframe["quantile"] = quantiles.reindex(df_indexed.index).values
@@ -322,6 +329,12 @@ class LightGBMStrategy(IStrategy):
             (dataframe["quantile"] >= self.ENTRY_QUANTILE) & ~is_grace & ~is_month_end,
             "enter_long",
         ] = 1
+        # Suppress shorts: Freqtrade 2025.7 futures mode converts exit_long
+        # to enter_short when flat — this prevents that.
+        dataframe["enter_short"] = 0
+        # Clear signals on the last row (current unclosed candle) so the bot
+        # only acts on fully-closed candle data, matching the backtest.
+        dataframe.loc[dataframe.index[-1:], "enter_long"] = 0
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
@@ -338,4 +351,7 @@ class LightGBMStrategy(IStrategy):
         )
         dataframe.loc[is_month_end, "exit_long"] = 1
 
+        dataframe["exit_short"] = 0
+        # Clear signals on the last row (current unclosed candle).
+        dataframe.loc[dataframe.index[-1:], "exit_long"] = 0
         return dataframe

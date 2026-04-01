@@ -134,6 +134,40 @@ def assign_decile_expanding(x, bins=10, min_periods=None):
     return raw_bin.where(pct.notna()).astype("Int64")
 
 
+def rolling_pct_rank(x, window, min_periods=None):
+    """Rolling percentile rank over a fixed window.
+
+    At position *i* the rank equals the fraction of values in the window
+    ``[max(0, i-window+1) : i+1]`` that are <= ``x[i]``.
+    Positions before *min_periods* valid values are NaN.
+    """
+    if min_periods is None:
+        min_periods = 1
+
+    def _rank_in_window(w):
+        return np.sum(w <= w[-1]) / len(w)
+
+    result = x.rolling(window, min_periods=min_periods).apply(
+        _rank_in_window, raw=True,
+    )
+    return result
+
+
+def assign_decile_rolling(x, bins=10, window=None, min_periods=None):
+    """Assign quantile bins using a rolling window (no forward-looking).
+
+    Like assign_decile_expanding but ranks against only the last *window*
+    values instead of all previous values.
+    """
+    if window is None:
+        raise ValueError("window is required for assign_decile_rolling")
+    if min_periods is None:
+        min_periods = min(bins * 5, window)
+    pct = rolling_pct_rank(x, window=window, min_periods=min_periods)
+    raw_bin = np.ceil(pct * bins).clip(1, bins)
+    return raw_bin.where(pct.notna()).astype("Int64")
+
+
 def resolve_feature_flags(config):
     defaults = {
         "returns": True,

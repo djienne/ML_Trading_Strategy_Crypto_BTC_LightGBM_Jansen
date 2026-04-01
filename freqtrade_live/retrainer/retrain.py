@@ -13,6 +13,7 @@ Lifecycle
    and save the last fold's model to the shared volume.
 """
 
+import gc
 import glob
 import json
 import logging
@@ -226,7 +227,7 @@ def validate_training_data(model_data):
     return True
 
 
-def train_model(model_data):
+def train_model(model_data, last_fold_only=False):
     """Train using the SAME rolling-CV code as the backtest.
 
     Calls src/modeling.train_and_predict() with params from module constants:
@@ -237,6 +238,7 @@ def train_model(model_data):
       - seed=42 for reproducibility
 
     The last fold's model is deployed as the live model.
+    When last_fold_only=True, only the last fold is trained (fast startup).
     """
     # Clear old folds to prevent stale models from being promoted
     if os.path.isdir(FOLD_DIR):
@@ -244,7 +246,7 @@ def train_model(model_data):
     os.makedirs(FOLD_DIR, exist_ok=True)
 
     # Use the exact same function as `python main.py train`
-    predictions = train_and_predict(
+    predictions, train_meta = train_and_predict(
         model_data,
         interval=INTERVAL,
         bar_type="time",
@@ -256,6 +258,7 @@ def train_model(model_data):
         min_data_in_leaf=MIN_DATA_IN_LEAF,
         feature_fraction=FEATURE_FRACTION,
         learning_rate=LEARNING_RATE,
+        last_fold_only=last_fold_only,
     )
 
     # Find the last fold model — this is the one trained on the most
@@ -267,10 +270,11 @@ def train_model(model_data):
     last_fold_path = fold_files[-1]
     last_fold_num = len(fold_files)
 
-    # Load the last fold model to get metadata
+    # Use best_iteration from training (not from reloaded model, which
+    # loses early-stopping metadata and returns -1).
     model = lgb.Booster(model_file=last_fold_path)
     feature_names = model.feature_name()
-    best_iter = model.best_iteration if model.best_iteration else model.current_iteration()
+    best_iter = train_meta.get("last_best_iteration") or model.current_iteration()
 
     # Compute overall IC and last fold's validation IC
     if not predictions.empty and "target" in predictions.columns and "prediction" in predictions.columns:
@@ -299,7 +303,8 @@ def train_model(model_data):
     return last_fold_path, feature_names, val_ic, last_fold_val_ic, best_iter, last_fold_num, predictions
 
 
-def save_model(last_fold_path, feature_names, val_ic, last_fold_val_ic, best_iter, num_folds, predictions):
+def save_model(last_fold_path, feature_names, val_ic, last_fold_val_ic, best_iter, num_folds, predictions,
+               skip_predictions=False):
     """Copy last fold model as latest_model.txt and save metadata.
 
     Order matters: predictions and metadata are saved BEFORE the model file,
@@ -309,7 +314,8 @@ def save_model(last_fold_path, feature_names, val_ic, last_fold_val_ic, best_ite
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     # 1. Save predictions FIRST (before model triggers strategy reload)
-    if predictions is not None and not predictions.empty:
+    #    Skip on startup retrain — keep existing prediction history.
+    if not skip_predictions and predictions is not None and not predictions.empty:
         try:
             save_frame(predictions, PREDICTIONS_PATH)
             logger.info("Saved predictions -> %s", PREDICTIONS_PATH)
@@ -370,7 +376,7 @@ def save_model(last_fold_path, feature_names, val_ic, last_fold_val_ic, best_ite
 # ---------------------------------------------------------------------------
 
 def run_pipeline():
-    """Download -> features -> validate -> train (rolling CV) -> save last fold."""
+    """Download -> features -> validate -> train ALL folds -> save model + predictions."""
     try:
         download_latest_data()
         data = load_and_prepare()
@@ -381,9 +387,32 @@ def run_pipeline():
 
         last_fold, feats, ic, last_ic, best, n_folds, preds = train_model(data)
         save_model(last_fold, feats, ic, last_ic, best, n_folds, preds)
+        gc.collect()
         return True
     except Exception:
         logger.exception("Training pipeline failed.")
+        return False
+
+
+def run_startup_retrain():
+    """Fast startup retrain: last fold only, keep existing prediction history."""
+    try:
+        download_latest_data()
+        data = load_and_prepare()
+
+        if not validate_training_data(data):
+            logger.error("Data validation failed. Keeping existing model.")
+            return False
+
+        last_fold, feats, ic, last_ic, best, n_folds, preds = train_model(
+            data, last_fold_only=True,
+        )
+        save_model(last_fold, feats, ic, last_ic, best, n_folds, preds,
+                   skip_predictions=True)
+        gc.collect()
+        return True
+    except Exception:
+        logger.exception("Startup retrain failed.")
         return False
 
 
@@ -412,26 +441,22 @@ def main():
 
     cleanup_tmp_files()
 
-    last_train_month = None
-    if os.path.exists(MODEL_INFO_PATH):
-        try:
-            with open(MODEL_INFO_PATH) as fh:
-                info = json.load(fh)
-            dt = datetime.fromisoformat(info["training_date"])
-            last_train_month = dt.strftime("%Y-%m")
-            logger.info(
-                "Existing model trained on %s (month %s, %d folds).",
-                info["training_date"],
-                last_train_month,
-                info.get("num_folds", "?"),
-            )
-        except Exception:
-            logger.warning("Could not read model_info.json; will retrain.")
-
-    if not os.path.exists(MODEL_PATH):
-        logger.info("No model found. Training immediately ...")
-        if run_pipeline():
-            last_train_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    # Always retrain the last fold on startup to pick up code/feature changes.
+    # Only the last fold's model is needed for live trading; existing prediction
+    # history is kept on disk for the expanding quantile.
+    logger.info("Startup retrain (last fold only) ...")
+    if run_startup_retrain():
+        last_train_month = datetime.now(timezone.utc).strftime("%Y-%m")
+    else:
+        logger.error("Startup retrain failed; using existing model if available.")
+        last_train_month = None
+        if os.path.exists(MODEL_INFO_PATH):
+            try:
+                with open(MODEL_INFO_PATH) as fh:
+                    info = json.load(fh)
+                last_train_month = datetime.fromisoformat(info["training_date"]).strftime("%Y-%m")
+            except Exception:
+                pass
 
     while True:
         try:

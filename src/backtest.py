@@ -112,7 +112,8 @@ def _apply_stoploss(signal, returns, stoploss):
 
 def compute_signal_returns(pred_series, target_series, timestamps,
                            bins, entry_q, exit_q, interval, fee,
-                           direction="high", stoploss=None):
+                           direction="high", stoploss=None,
+                           quantile_window=None):
     """Compute long-only hysteresis returns with monthly boundaries.
 
     This is the single shared function used by both the backtest CLI
@@ -129,15 +130,21 @@ def compute_signal_returns(pred_series, target_series, timestamps,
     interval : str — candle interval (e.g. "15m") for month-end detection
     fee : float — fee per trade
     direction : "high" or "low"
+    quantile_window : int or None — rolling window in bars for quantile
+        computation.  Matches the training period so quantiles reflect the
+        current model's prediction distribution.  None = expanding (legacy).
 
     Returns
     -------
     dict with: trades, gross, net, sharpe, valid_mask, signal, quantiles
     """
-    from src.utils import assign_decile_expanding
+    from src.utils import assign_decile_expanding, assign_decile_rolling
 
     pred_s = pd.Series(pred_series, index=timestamps) if not isinstance(pred_series, pd.Series) else pred_series
-    quantiles = assign_decile_expanding(pred_s, bins=bins)
+    if quantile_window is not None:
+        quantiles = assign_decile_rolling(pred_s, bins=bins, window=quantile_window)
+    else:
+        quantiles = assign_decile_expanding(pred_s, bins=bins)
     valid = quantiles.notna()
     valid_mask = valid.values if hasattr(valid, 'values') else np.asarray(valid)
     q_arr = quantiles[valid].values.astype(np.int64)
@@ -286,6 +293,7 @@ def backtest(
     alpha_plot_path=None,
     stoploss=None,
     ic_thresh=None,
+    train_months=None,
 ):
     print("\nStarting Backtest...")
     if predictions.empty:
@@ -338,6 +346,13 @@ def backtest(
         if scope_used != "expanding":
             print(f"Note: hysteresis mode uses expanding quantiles (ignoring scope={scope_used}).")
 
+        # Compute rolling quantile window from training period
+        q_window = None
+        if train_months is not None:
+            bars_per_month = int(30.4375 * 24 * 60 / interval_to_minutes(interval))
+            q_window = bars_per_month * train_months
+            print(f"Quantile window: {q_window} bars ({train_months} months of {interval} candles)")
+
         # IC filter: skip bars where validation IC < threshold (same as grid search)
         pred_col = predictions["prediction"]
         target_col = predictions["target"]
@@ -353,6 +368,7 @@ def backtest(
             pred_col, target_col, ts,
             bins, target_quantile, exit_quantile, interval, fee,
             direction="high", stoploss=stoploss,
+            quantile_window=q_window,
         )
 
         # Map results back — when IC filtering is active, results are on the

@@ -80,6 +80,7 @@ def train_and_predict(
     min_data_in_leaf=100,
     feature_fraction=0.5,
     learning_rate=0.01,
+    last_fold_only=False,
 ):
     print("Starting model training (calendar-month rolling window)...")
     data = data.sort_index()
@@ -123,16 +124,21 @@ def train_and_predict(
         print(f"Need at least {train_months + 1} calendar months of data.")
         return pd.DataFrame()
 
-    print(f"Generated {len(splits)} calendar-month folds.")
+    total_folds = len(splits)
+    print(f"Generated {total_folds} calendar-month folds.")
+
+    if last_fold_only:
+        print(f"Training last fold only (fold {total_folds}/{total_folds}).")
+        splits = splits[-1:]
 
     all_predictions = []
 
     for fold, (train_mask, test_mask) in enumerate(splits):
-        fold_num = fold + 1
+        fold_num = total_folds if last_fold_only else fold + 1
         train_ts = timestamps[train_mask]
         test_ts = timestamps[test_mask]
         print(
-            f"Fold {fold_num}/{len(splits)}: "
+            f"Fold {fold_num}/{total_folds}: "
             f"train {train_ts.min().strftime('%Y-%m-%d')} -> "
             f"{train_ts.max().strftime('%Y-%m-%d')} ({train_mask.sum()} rows), "
             f"test {test_ts.min().strftime('%Y-%m')} ({test_mask.sum()} rows)"
@@ -186,7 +192,8 @@ def train_and_predict(
             model_path = os.path.join(model_dir, f"fold_{fold_num:02d}.txt")
             model.save_model(model_path)
 
-        best_iter = model.best_iteration or model.current_iteration()
+        bi = model.best_iteration
+        best_iter = bi if bi and bi > 0 else model.current_iteration()
 
         # Validation IC (used by grid search IC filtering)
         val_preds_arr = model.predict(X_val, num_iteration=best_iter)
@@ -210,6 +217,7 @@ def train_and_predict(
         gc.collect()
 
     if not all_predictions:
-        return pd.DataFrame()
+        return pd.DataFrame(), {"last_best_iteration": None}
 
-    return pd.concat(all_predictions).sort_index()
+    meta = {"last_best_iteration": best_iter}
+    return pd.concat(all_predictions).sort_index(), meta

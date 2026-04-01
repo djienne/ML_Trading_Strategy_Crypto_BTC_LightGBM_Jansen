@@ -190,6 +190,7 @@ def main():
             quantile_scope=args.quantile_scope,
             stoploss=args.stoploss,
             ic_thresh=args.ic_thresh,
+            train_months=config.get("train_months", 12),
         )
     else:
         parser.print_help()

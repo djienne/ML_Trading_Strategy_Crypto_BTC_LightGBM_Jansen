@@ -443,6 +443,12 @@ def main():
 
     cleanup_tmp_files()
 
+    # Remove the old model so the trader disables signals until retrain
+    # completes. This prevents trading with a stale model on startup.
+    if os.path.exists(MODEL_PATH):
+        os.remove(MODEL_PATH)
+        logger.info("Removed stale model — trader will wait for fresh retrain.")
+
     # Always retrain on startup to pick up code/feature changes.
     # Use fast last-fold-only if prediction history already exists on disk;
     # otherwise do a full retrain to generate the prediction history file.

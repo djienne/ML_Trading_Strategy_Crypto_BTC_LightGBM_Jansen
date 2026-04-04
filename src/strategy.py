@@ -35,7 +35,7 @@ def main():
     train_parser.add_argument(
         "--boost-rounds",
         type=int,
-        default=250,
+        default=5000,
         help="Boosting rounds per fold for fresh training",
     )
     train_scope = train_parser.add_mutually_exclusive_group()

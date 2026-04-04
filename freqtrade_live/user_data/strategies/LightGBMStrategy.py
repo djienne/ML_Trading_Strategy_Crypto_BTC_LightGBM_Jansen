@@ -52,15 +52,15 @@ class LightGBMStrategy(IStrategy):
     MODEL_INFO_PATH = "/freqtrade/shared/models/model_info.json"
     PRED_HISTORY_PATH = "/freqtrade/shared/models/latest_predictions.feather"
 
-    # Quantile signal parameters (bins=200).
-    # Entry: quantile >= 198 (top 1%)
-    # Exit:  quantile < 180 (drops below top 10%)
-    # Must match backtest: --bins 200 --quantile 198 --exit-quantile 180
-    BINS = 200
-    ENTRY_QUANTILE = 198   # top 1% (99th percentile)
-    EXIT_QUANTILE = 180    # exit when drops below top 10% (200 * 0.90)
+    # Quantile signal parameters (bins=100).
+    # Entry: quantile >= 100 (top bin)
+    # Exit:  quantile < 90 (drops below top 10%)
+    # Must match backtest: --bins 100 --quantile 100 --exit-quantile 90
+    BINS = 100
+    ENTRY_QUANTILE = 100   # top bin (100th percentile)
+    EXIT_QUANTILE = 90     # exit when drops below top 10%
     TRAIN_MONTHS = 12      # must match retrainer; used for rolling quantile window
-    IC_THRESH = 0.0        # disable signals if last fold's val_ic < this
+    IC_THRESH = None       # no IC filtering (grid search winner uses no_filt)
 
     # ---- internal state ----
     _model = None

@@ -48,8 +48,8 @@ def main():
         help="Additional boosting rounds when resuming existing models",
     )
     train_parser.add_argument("--train-months", type=int, default=12, help="Rolling training window in months")
-    train_parser.add_argument("--num-leaves", type=int, default=16)
-    train_parser.add_argument("--min-data-in-leaf", type=int, default=100)
+    train_parser.add_argument("--num-leaves", type=int, default=31)
+    train_parser.add_argument("--min-data-in-leaf", type=int, default=50)
     train_parser.add_argument("--feature-fraction", type=float, default=0.5)
     train_parser.add_argument("--learning-rate", type=float, default=0.01)
 
@@ -67,18 +67,18 @@ def main():
     backtest_parser = subparsers.add_parser("backtest", help="Backtest signals by quantile")
     backtest_parser.add_argument("--symbol", help="Override symbol")
     backtest_parser.add_argument("--interval", help="Override interval")
-    backtest_parser.add_argument("--bins", type=int, default=200, help="Number of quantiles")
+    backtest_parser.add_argument("--bins", type=int, default=100, help="Number of quantiles")
     backtest_parser.add_argument(
         "--quantile",
         type=int,
-        default=198,
-        help="Entry quantile threshold (long uses >=). Default 198 = top 1%% with 200 bins.",
+        default=100,
+        help="Entry quantile threshold (long uses >=). Default 100 = top bin with 100 bins.",
     )
     backtest_parser.add_argument(
         "--exit-quantile",
         type=int,
-        default=180,
-        help="Exit quantile threshold (exit long when <). Default 180 = drops below top 10%% with 200 bins.",
+        default=90,
+        help="Exit quantile threshold (exit long when <). Default 90 = drops below top 10%% with 100 bins.",
     )
     backtest_parser.add_argument(
         "--side",

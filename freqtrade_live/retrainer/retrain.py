@@ -67,8 +67,8 @@ DOWNLOAD_CONFIG_PATH = "/app/_download_config.json"
 # Model hyperparams — must match the deployed grid search winner.
 BOOST_ROUNDS = 5000
 TRAIN_MONTHS = 12
-NUM_LEAVES = 16
-MIN_DATA_IN_LEAF = 100
+NUM_LEAVES = 31
+MIN_DATA_IN_LEAF = 50
 FEATURE_FRACTION = 0.5
 LEARNING_RATE = 0.01
 MIN_TRAINING_ROWS = 10_000

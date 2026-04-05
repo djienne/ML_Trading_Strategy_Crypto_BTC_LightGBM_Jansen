@@ -422,6 +422,35 @@ def run_startup_retrain():
 # Scheduling
 # ---------------------------------------------------------------------------
 
+def _predictions_sufficient():
+    """Check if existing prediction history has enough data for rolling quantile."""
+    if not os.path.exists(PREDICTIONS_PATH):
+        return False
+    try:
+        preds = load_frame(PREDICTIONS_PATH)
+        if "prediction" not in preds.columns:
+            return False
+        # Filter to inference symbol
+        if isinstance(preds.index, pd.MultiIndex):
+            sym_level = preds.index.get_level_values("symbol")
+            preds = preds[sym_level == INFERENCE_SYMBOL]
+        # Need at least rolling-window-size rows for the quantile to work
+        from src.utils import interval_to_minutes
+        bars_per_month = int(30.4375 * 24 * 60 / interval_to_minutes(INTERVAL))
+        min_rows = bars_per_month * TRAIN_MONTHS
+        if len(preds) < min_rows:
+            logger.warning(
+                "Prediction history too sparse: %d rows < %d minimum.",
+                len(preds), min_rows,
+            )
+            return False
+        logger.info("Prediction history OK: %d rows (need >= %d).", len(preds), min_rows)
+        return True
+    except Exception:
+        logger.exception("Could not validate prediction history.")
+        return False
+
+
 def should_train_now(last_train_month):
     """True if we haven't trained yet this month and it's >= the 1st."""
     now = datetime.now(timezone.utc)
@@ -450,13 +479,13 @@ def main():
         logger.info("Removed stale model — trader will wait for fresh retrain.")
 
     # Always retrain on startup to pick up code/feature changes.
-    # Use fast last-fold-only if prediction history already exists on disk;
-    # otherwise do a full retrain to generate the prediction history file.
-    if os.path.exists(PREDICTIONS_PATH):
+    # Use fast last-fold-only if prediction history has enough data;
+    # otherwise do a full retrain to generate/rebuild the prediction history.
+    if _predictions_sufficient():
         logger.info("Startup retrain (last fold only) ...")
         ok = run_startup_retrain()
     else:
-        logger.info("No prediction history — full retrain required on first startup ...")
+        logger.info("Insufficient prediction history — full retrain required ...")
         ok = run_pipeline()
     if ok:
         last_train_month = datetime.now(timezone.utc).strftime("%Y-%m")

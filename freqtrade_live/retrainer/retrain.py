@@ -34,9 +34,9 @@ from scipy.stats import spearmanr
 sys.path.insert(0, "/app")
 
 from src.features import engineer_features, prepare_target
-from src.data_io import load_data, load_data_multi, save_frame, select_symbol
+from src.data_io import load_data, load_data_multi, load_frame, save_frame, select_symbol
 from src.modeling import train_and_predict
-from src.utils import get_time_index
+from src.utils import get_time_index, interval_to_minutes
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -435,7 +435,6 @@ def _predictions_sufficient():
             sym_level = preds.index.get_level_values("symbol")
             preds = preds[sym_level == INFERENCE_SYMBOL]
         # Need at least rolling-window-size rows for the quantile to work
-        from src.utils import interval_to_minutes
         bars_per_month = int(30.4375 * 24 * 60 / interval_to_minutes(INTERVAL))
         min_rows = bars_per_month * TRAIN_MONTHS
         if len(preds) < min_rows:

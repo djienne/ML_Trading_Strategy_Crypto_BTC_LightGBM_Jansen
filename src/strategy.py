@@ -92,6 +92,12 @@ def main():
     backtest_parser.add_argument("--ic-thresh", type=float, default=None,
                                      help="Skip bars where validation IC < threshold (e.g. 0.0)")
     backtest_parser.add_argument(
+        "--direction",
+        choices=["high", "low"],
+        default="high",
+        help="Hysteresis direction: high (buy top/sell lower) or low (buy bottom/sell higher).",
+    )
+    backtest_parser.add_argument(
         "--quantile-scope",
         choices=["auto", "timestamp", "date", "global", "expanding"],
         default="auto",
@@ -191,6 +197,7 @@ def main():
             stoploss=args.stoploss,
             ic_thresh=args.ic_thresh,
             train_months=config.get("train_months", 12),
+            direction=args.direction,
         )
     else:
         parser.print_help()

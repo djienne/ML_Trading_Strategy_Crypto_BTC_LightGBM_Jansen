@@ -278,6 +278,97 @@ def plot_alpha_factor(alpha_series, output_path, title=None):
     print(f"Saved alpha factor plot: {output_path}")
 
 
+def score_hysteresis_predictions(
+    predictions,
+    bins,
+    target_quantile,
+    exit_quantile,
+    interval,
+    fee,
+    direction="high",
+    stoploss=None,
+    ic_thresh=None,
+    train_months=None,
+):
+    """Pure helper to score predictions using the hysteresis engine.
+
+    Returns (scored_dataframe, metrics_dict).
+    """
+    predictions = predictions.copy()
+    predictions = predictions.dropna(subset=["target", "prediction"])
+    time_index = pd.to_datetime(get_time_index(predictions.index))
+    symbol_index = get_symbol_key(predictions.index)
+    predictions = predictions.reset_index(drop=True)
+    predictions["timestamp"] = time_index
+    predictions["symbol"] = symbol_index
+
+    if predictions.empty:
+        return None, None
+
+    # Compute rolling quantile window from training period
+    q_window = None
+    if train_months is not None:
+        bars_per_month = int(30.4375 * 24 * 60 / interval_to_minutes(interval))
+        q_window = bars_per_month * train_months
+
+    # IC filter: skip bars where validation IC < threshold (same as grid search)
+    pred_col = predictions["prediction"]
+    target_col = predictions["target"]
+    ts = predictions["timestamp"]
+    ic_mask = None
+    if ic_thresh is not None and "val_ic" in predictions.columns:
+        ic_mask = (predictions["val_ic"] >= ic_thresh).values
+        pred_col = pred_col[ic_mask]
+        target_col = target_col[ic_mask]
+        ts = ts[ic_mask]
+
+    r = compute_signal_returns(
+        pred_col, target_col, ts,
+        bins, target_quantile, exit_quantile, interval, fee,
+        direction=direction, stoploss=stoploss,
+        quantile_window=q_window,
+    )
+
+    # Map results back — when IC filtering is active, results are on the
+    # filtered subset. Use the filtered index to map back to full predictions.
+    if ic_mask is not None:
+        filtered_idx = predictions.index[ic_mask]
+        valid_in_filtered = r["valid_mask"]
+        valid_full_idx = filtered_idx[valid_in_filtered]
+
+        predictions["signal"] = 0
+        predictions.loc[valid_full_idx, "signal"] = r["signal"]
+        predictions["quantile"] = np.nan
+        predictions.loc[filtered_idx, "quantile"] = r["quantiles"].values
+        predictions["strategy_gross"] = 0.0
+        predictions["strategy_net"] = 0.0
+        predictions.loc[valid_full_idx, "strategy_gross"] = r["gross_arr"]
+        predictions.loc[valid_full_idx, "strategy_net"] = r["net_arr"]
+    else:
+        predictions["signal"] = 0
+        predictions.loc[r["valid_mask"], "signal"] = r["signal"]
+        predictions["quantile"] = r["quantiles"].values
+        predictions["strategy_gross"] = 0.0
+        predictions["strategy_net"] = 0.0
+        predictions.loc[r["valid_mask"], "strategy_gross"] = r["gross_arr"]
+        predictions.loc[r["valid_mask"], "strategy_net"] = r["net_arr"]
+
+    predictions["prev_signal"] = predictions.groupby("symbol")["signal"].shift(1).fillna(0)
+    predictions["trades"] = (predictions["signal"] - predictions["prev_signal"]).abs()
+    predictions["costs"] = predictions["trades"] * fee
+
+    metrics = {
+        "trades": r["trades"],
+        "gross": r["gross"],
+        "net": r["net"],
+        "sharpe": r["sharpe"],
+        "ic_kept": ic_mask.sum() if ic_mask is not None else len(predictions),
+        "ic_total": len(predictions),
+        "q_window": q_window,
+    }
+    return predictions, metrics
+
+
 def backtest(
     predictions,
     fee=0.001,
@@ -294,6 +385,7 @@ def backtest(
     stoploss=None,
     ic_thresh=None,
     train_months=None,
+    direction="high",
 ):
     print("\nStarting Backtest...")
     if predictions.empty:
@@ -323,81 +415,55 @@ def backtest(
                 rule = f"quantile >= {target_quantile} long / <= {opposite_quantile} short"
         else:
             comparator = ">=" if resolved_side == "long" else "<="
-            rule = f"quantile {comparator} {target_quantile} ({resolved_side})"
+            rule = f"quantile {comparator} {target_quantile} ({resolved_side}, {direction})"
     print(f"Signal setup: scope={scope_used}, bins={bins}, rule={rule}.")
 
     _hysteresis_pnl_done = False
     if exit_quantile is not None and resolved_side == "long":
-        # Hysteresis path: skip add_quantile_labels() — compute_signal_returns()
-        # handles quantiles internally. This ensures the CLI backtest matches
-        # the grid search exactly (same data, same code path).
-        predictions = predictions.copy()
-        predictions = predictions.dropna(subset=["target", "prediction"])
-        time_index = pd.to_datetime(get_time_index(predictions.index))
-        symbol_index = get_symbol_key(predictions.index)
-        predictions = predictions.reset_index(drop=True)
-        predictions["timestamp"] = time_index
-        predictions["symbol"] = symbol_index
-
-        if predictions.empty:
-            print("No valid predictions to backtest after dropping NaNs.")
-            return
-
+        # Hysteresis path: compute_signal_returns() handles quantiles internally.
+        # This ensures the CLI backtest matches the grid search exactly.
         if scope_used != "expanding":
             print(f"Note: hysteresis mode uses expanding quantiles (ignoring scope={scope_used}).")
 
-        # Compute rolling quantile window from training period
-        q_window = None
-        if train_months is not None:
-            bars_per_month = int(30.4375 * 24 * 60 / interval_to_minutes(interval))
-            q_window = bars_per_month * train_months
-            print(f"Quantile window: {q_window} bars ({train_months} months of {interval} candles)")
-
-        # IC filter: skip bars where validation IC < threshold (same as grid search)
-        pred_col = predictions["prediction"]
-        target_col = predictions["target"]
-        ts = predictions["timestamp"]
-        if ic_thresh is not None and "val_ic" in predictions.columns:
-            ic_mask = (predictions["val_ic"] >= ic_thresh).values
-            pred_col = pred_col[ic_mask]
-            target_col = target_col[ic_mask]
-            ts = ts[ic_mask]
-            print(f"IC filter (>={ic_thresh}): kept {ic_mask.sum()}/{len(ic_mask)} bars.")
-
-        r = compute_signal_returns(
-            pred_col, target_col, ts,
-            bins, target_quantile, exit_quantile, interval, fee,
-            direction="high", stoploss=stoploss,
-            quantile_window=q_window,
+        predictions, m = score_hysteresis_predictions(
+            predictions, bins, target_quantile, exit_quantile, interval, fee,
+            direction=direction, stoploss=stoploss, ic_thresh=ic_thresh,
+            train_months=train_months
         )
 
-        # Map results back — when IC filtering is active, results are on the
-        # filtered subset. Use the filtered index to map back to full predictions.
-        if ic_thresh is not None and "val_ic" in predictions.columns:
-            filtered_idx = predictions.index[ic_mask]
-            valid_in_filtered = r["valid_mask"]
-            valid_full_idx = filtered_idx[valid_in_filtered]
+        if predictions is None:
+            print("No valid predictions to backtest after dropping NaNs.")
+            return
 
-            predictions["signal"] = 0
-            predictions.loc[valid_full_idx, "signal"] = r["signal"]
-            predictions["quantile"] = np.nan
-            predictions.loc[filtered_idx, "quantile"] = r["quantiles"].values
-            predictions["strategy_gross"] = 0.0
-            predictions["strategy_net"] = 0.0
-            predictions.loc[valid_full_idx, "strategy_gross"] = r["gross_arr"]
-            predictions.loc[valid_full_idx, "strategy_net"] = r["net_arr"]
-        else:
-            predictions["signal"] = 0
-            predictions.loc[r["valid_mask"], "signal"] = r["signal"]
-            predictions["quantile"] = r["quantiles"].values
-            predictions["strategy_gross"] = 0.0
-            predictions["strategy_net"] = 0.0
-            predictions.loc[r["valid_mask"], "strategy_gross"] = r["gross_arr"]
-            predictions.loc[r["valid_mask"], "strategy_net"] = r["net_arr"]
+        if m["q_window"] is not None:
+            print(f"Quantile window: {m['q_window']} bars ({train_months} months of {interval} candles)")
+        if ic_thresh is not None:
+            print(f"IC filter (>={ic_thresh}): kept {m['ic_kept']}/{m['ic_total']} bars.")
 
-        predictions["prev_signal"] = predictions.groupby("symbol")["signal"].shift(1).fillna(0)
-        predictions["trades"] = (predictions["signal"] - predictions["prev_signal"]).abs()
-        predictions["costs"] = predictions["trades"] * fee
+        summary_start = predictions["timestamp"].min()
+        summary_end = predictions["timestamp"].max()
+
+        print("------------------------------")
+        print(f"Backtest Results ({summary_start} to {summary_end})")
+        print("------------------------------")
+        print(f"Transaction Fee: {fee:.2%}")
+        if stoploss:
+            print(f"Stoploss: {stoploss:.0%}")
+        print(f"Total Trades: {m['trades']}")
+        print(f"Total Gross Return: {m['gross']:.2%}")
+        print(f"Total Net Return:   {m['net']:.2%}")
+        print(f"Annualized Sharpe:  {m['sharpe']:.4f}")
+        print("------------------------------")
+
+        if plot_path:
+            # Re-index to ensure continuous timeline for plotting
+            perf = predictions.set_index("timestamp").sort_index()
+            # cumprod return needs to handle symbols correctly if multi-symbol
+            # but for BTC-only trading we can just use the flat net return.
+            perf["cum_gross"] = (1 + perf["strategy_gross"]).cumprod() - 1
+            perf["cum_net"] = (1 + perf["strategy_net"]).cumprod() - 1
+            plot_equity_curve(perf, plot_path, title=f"Hysteresis {plot_label} (e={target_quantile}, x={exit_quantile})")
+
         _hysteresis_pnl_done = True
     else:
         # Non-hysteresis paths need add_quantile_labels() for quantile assignment

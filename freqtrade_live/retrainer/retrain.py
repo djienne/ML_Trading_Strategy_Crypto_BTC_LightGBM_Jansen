@@ -175,6 +175,21 @@ def _archive_current_if_needed():
         return False
 
 
+def _expected_model_config() -> dict:
+    return {
+        "train_symbols": TRAIN_SYMBOLS,
+        "inference_symbol": INFERENCE_SYMBOL,
+        "interval": INTERVAL,
+        "boost_rounds": BOOST_ROUNDS,
+        "train_months": TRAIN_MONTHS,
+        "num_leaves": NUM_LEAVES,
+        "min_data_in_leaf": MIN_DATA_IN_LEAF,
+        "feature_fraction": FEATURE_FRACTION,
+        "learning_rate": LEARNING_RATE,
+        "feature_flags": FEATURE_FLAGS,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Pipeline steps
 # ---------------------------------------------------------------------------
@@ -406,6 +421,10 @@ def save_model(last_fold_path, feature_names, val_ic, last_fold_val_ic, best_ite
         "last_fold_file": os.path.basename(last_fold_path),
         "boost_rounds": BOOST_ROUNDS,
         "train_months": TRAIN_MONTHS,
+        "num_leaves": NUM_LEAVES,
+        "min_data_in_leaf": MIN_DATA_IN_LEAF,
+        "feature_fraction": FEATURE_FRACTION,
+        "learning_rate": LEARNING_RATE,
         "feature_flags": FEATURE_FLAGS,
         "training_method": "rolling_cv (src/modeling.train_and_predict)",
     }
@@ -542,6 +561,34 @@ def _load_last_train_month():
         return None
 
 
+def _load_current_model_info():
+    if not os.path.exists(MODEL_INFO_PATH):
+        return None
+    try:
+        with open(MODEL_INFO_PATH) as fh:
+            return json.load(fh)
+    except Exception:
+        logger.exception("Could not read model_info.json")
+        return None
+
+
+def _training_config_changed(model_info: dict | None):
+    if not model_info:
+        return True
+
+    expected = _expected_model_config()
+    for key, value in expected.items():
+        if model_info.get(key) != value:
+            logger.info(
+                "Published model config mismatch for %s: have=%r expected=%r; full retrain required.",
+                key,
+                model_info.get(key),
+                value,
+            )
+            return True
+    return False
+
+
 def _training_sources_changed():
     if not os.path.exists(MODEL_PATH):
         return True
@@ -588,10 +635,12 @@ def main():
     _archive_current_if_needed()
 
     model_exists = os.path.exists(MODEL_PATH)
+    current_model_info = _load_current_model_info() if model_exists else None
     predictions_ok = _predictions_sufficient()
+    config_changed = _training_config_changed(current_model_info) if model_exists else True
     sources_changed = _training_sources_changed() if model_exists else True
 
-    if model_exists and predictions_ok and not sources_changed:
+    if model_exists and predictions_ok and not config_changed and not sources_changed:
         logger.info("Existing model and prediction history are healthy; skipping startup retrain.")
         last_train_month = _load_last_train_month()
     else:
@@ -599,6 +648,8 @@ def main():
             reason = "no published model"
         elif not predictions_ok:
             reason = "prediction history missing, sparse, or stale"
+        elif config_changed:
+            reason = "published model config no longer matches retrainer settings"
         else:
             reason = "training source changed since the last model publish"
 

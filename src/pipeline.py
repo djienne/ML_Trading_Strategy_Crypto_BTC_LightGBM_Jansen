@@ -224,6 +224,7 @@ def run_backtest(
     stoploss=None,
     ic_thresh=None,
     train_months=None,
+    direction="high",
 ):
     print(f"Backtest target: {target_symbol}")
     predictions, paths = load_predictions_for_symbol(config, target_symbol, interval)
@@ -245,7 +246,7 @@ def run_backtest(
         resolved_side = side
         if resolved_side == "auto":
             resolved_side = "long" if quantile > bins / 2 else "short"
-        rule_tag = f"q{quantile}_{resolved_side}"
+        rule_tag = f"q{quantile}_{resolved_side}_{direction}"
 
     plot_path = os.path.join("plot", f"{base_name}_equity_{rule_tag}_{bins}_{scope_used}.png")
     alpha_plot_path = os.path.join("plot", f"{base_name}_alpha_{rule_tag}_{bins}_{scope_used}.png")
@@ -267,4 +268,5 @@ def run_backtest(
         ic_thresh=ic_thresh,
         alpha_plot_path=alpha_plot_path,
         train_months=train_months,
+        direction=direction,
     )

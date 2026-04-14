@@ -11,26 +11,35 @@ import csv
 import gc
 import pandas as pd
 import numpy as np
+from src.config_io import load_config
 from src.data_io import load_data_multi, select_symbol
 from src.features import engineer_features, prepare_target
 from src.modeling import train_and_predict
-from src.utils import get_time_index, get_symbol_key
-from src.backtest import compute_signal_returns
+from src.utils import get_time_index, get_symbol_key, get_train_symbols, resolve_bar_type, resolve_feature_flags
+from src.backtest import score_hysteresis_predictions
 from src.utils import interval_to_minutes
+
+# Load unified config
+config = load_config("config.json")
+INTERVAL = config.get("candle_interval", "15m")
+TRAIN_SYMBOLS = get_train_symbols(config)
+INFERENCE_SYMBOL = config.get("inference_symbol", "BTCUSDT")
+FEATHER_DIR = config.get("feather_dir", "data/feather")
+FEATURE_FLAGS = resolve_feature_flags(config)
+BAR_TYPE = resolve_bar_type(config)
 
 # Fixed params
 LR = 0.01
 BOOST_ROUNDS = 5000
 FEE = 0.0005
-STOPLOSS = -0.20  # must match live strategy stoploss
-INTERVAL = "15m"
+STOPLOSS = -0.20
 RESULTS_CSV = "grid_search_results.csv"
 
 # Load data once
-print("Loading BTC+ETH 15m data...", flush=True)
-df = load_data_multi("data/feather", ["BTCUSDT", "ETHUSDT"], INTERVAL)
-features_df = engineer_features(df, interval=INTERVAL, bar_type="time")
-data = prepare_target(df, features_df, interval=INTERVAL, bar_type="time")
+print(f"Loading {TRAIN_SYMBOLS} {INTERVAL} data...", flush=True)
+df = load_data_multi(FEATHER_DIR, TRAIN_SYMBOLS, INTERVAL)
+features_df = engineer_features(df, interval=INTERVAL, bar_type=BAR_TYPE, feature_flags=FEATURE_FLAGS)
+data = prepare_target(df, features_df, interval=INTERVAL, bar_type=BAR_TYPE, feature_flags=FEATURE_FLAGS)
 data = data.sort_index()
 del df, features_df
 gc.collect()
@@ -60,12 +69,8 @@ with open(RESULTS_CSV, "w", newline="") as f:
 
 total_configs = len(TRAIN_MONTHS_LIST) * len(MODEL_CONFIGS)
 config_num = 0
-best_overall = {"net": -999}
 
 for train_months in TRAIN_MONTHS_LIST:
-    bars_per_month = int(30.4375 * 24 * 60 / interval_to_minutes(INTERVAL))
-    q_window = bars_per_month * train_months
-
     for leaves, ff, mdil in MODEL_CONFIGS:
         config_num += 1
 
@@ -73,7 +78,7 @@ for train_months in TRAIN_MONTHS_LIST:
         predictions, _meta = train_and_predict(
             data,
             interval=INTERVAL,
-            bar_type="time",
+            bar_type=BAR_TYPE,
             boost_rounds=BOOST_ROUNDS,
             train_months=train_months,
             num_leaves=leaves,
@@ -85,34 +90,17 @@ for train_months in TRAIN_MONTHS_LIST:
         if predictions.empty:
             continue
 
-        # Filter to BTC only (same as CLI backtest)
-        btc_preds = select_symbol(predictions, "BTCUSDT")
+        # Filter to inference symbol (same as CLI backtest)
+        btc_preds = select_symbol(predictions, INFERENCE_SYMBOL)
         del predictions
         if btc_preds.empty:
             gc.collect()
             continue
 
-        btc_ts = pd.to_datetime(get_time_index(btc_preds.index))
-        pred_vals = btc_preds["prediction"]
-        target_vals = btc_preds["target"]
-        ic_vals = btc_preds["val_ic"]
-
         best_this_config = {"net": -999}
         batch_results = []
 
         for ic_thresh in IC_THRESHOLDS:
-            # IC filter: skip bad-IC bars entirely (don't zero — that distorts
-            # expanding quantiles for future bars)
-            if ic_thresh is not None:
-                ic_mask = (ic_vals >= ic_thresh).values
-                filtered_preds = pred_vals[ic_mask]
-                filtered_targets = target_vals[ic_mask]
-                filtered_ts = btc_ts[ic_mask]
-            else:
-                filtered_preds = pred_vals
-                filtered_targets = target_vals
-                filtered_ts = btc_ts
-
             for bins in BINS_LIST:
                 # Normal: buy high
                 for entry_pct, exit_pct in SIGNAL_HIGH:
@@ -120,18 +108,21 @@ for train_months in TRAIN_MONTHS_LIST:
                     exit_q = int(bins * exit_pct / 100)
                     if exit_q >= entry_q:
                         continue
-                    r = compute_signal_returns(
-                        filtered_preds, filtered_targets, filtered_ts,
-                        bins, entry_q, exit_q, INTERVAL, FEE, direction="high", stoploss=STOPLOSS,
-                        quantile_window=q_window,
+                    
+                    _, m = score_hysteresis_predictions(
+                        btc_preds, bins, entry_q, exit_q, INTERVAL, FEE,
+                        direction="high", stoploss=STOPLOSS, ic_thresh=ic_thresh,
+                        train_months=train_months
                     )
+                    if m is None: continue
+                    
                     row = dict(tm=train_months, leaves=leaves, ff=ff, mdil=mdil,
                                direction="high", bins=bins, entry_pct=entry_pct,
                                exit_pct=exit_pct, ic_thresh=ic_thresh,
-                               trades=r["trades"], gross=r["gross"],
-                               net=r["net"], sharpe=r["sharpe"])
+                               trades=m["trades"], gross=m["gross"],
+                               net=m["net"], sharpe=m["sharpe"])
                     batch_results.append(row)
-                    if r["net"] > best_this_config.get("net", -999):
+                    if m["net"] > best_this_config.get("net", -999):
                         best_this_config = row
 
                 # Flipped: buy low
@@ -139,27 +130,27 @@ for train_months in TRAIN_MONTHS_LIST:
                     exit_q = int(bins * exit_low_pct / 100)
                     if exit_q <= entry_low:
                         continue
-                    r = compute_signal_returns(
-                        filtered_preds, filtered_targets, filtered_ts,
-                        bins, entry_low, exit_q, INTERVAL, FEE, direction="low", stoploss=STOPLOSS,
-                        quantile_window=q_window,
+
+                    _, m = score_hysteresis_predictions(
+                        btc_preds, bins, entry_low, exit_q, INTERVAL, FEE,
+                        direction="low", stoploss=STOPLOSS, ic_thresh=ic_thresh,
+                        train_months=train_months
                     )
+                    if m is None: continue
+
                     row = dict(tm=train_months, leaves=leaves, ff=ff, mdil=mdil,
                                direction="low", bins=bins, entry_pct=entry_low,
                                exit_pct=exit_low_pct, ic_thresh=ic_thresh,
-                               trades=r["trades"], gross=r["gross"],
-                               net=r["net"], sharpe=r["sharpe"])
+                               trades=m["trades"], gross=m["gross"],
+                               net=m["net"], sharpe=m["sharpe"])
                     batch_results.append(row)
-                    if r["net"] > best_this_config.get("net", -999):
+                    if m["net"] > best_this_config.get("net", -999):
                         best_this_config = row
 
         # Write batch to CSV
         with open(RESULTS_CSV, "a", newline="") as f:
             w = csv.DictWriter(f, csv_fields)
             w.writerows(batch_results)
-
-        if best_this_config.get("net", -999) > best_overall.get("net", -999):
-            best_overall = best_this_config
 
         b = best_this_config
         ic_str = f"ic>{b.get('ic_thresh')}" if b.get('ic_thresh') is not None else "no_filt"

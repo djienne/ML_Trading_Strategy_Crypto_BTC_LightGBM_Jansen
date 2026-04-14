@@ -18,7 +18,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = SCRIPT_DIR / "freqtrade_live" / "user_data" / "config.json"
+CONFIG_PATH = SCRIPT_DIR / "user_data" / "config.json"
 
 # Read API credentials from project config
 try:

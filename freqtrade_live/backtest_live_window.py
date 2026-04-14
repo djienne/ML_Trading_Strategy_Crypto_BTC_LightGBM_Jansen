@@ -445,6 +445,11 @@ def replay_segment(
     position = 0
     position_series = pd.Series(0, index=idx, dtype="int64")
     for i in range(1, len(idx)):
+        if idx[i] < segment.snapshot.live_from:
+            position = 0
+            position_series.iloc[i] = 0
+            continue
+
         enter_now = bool(entry_base.iloc[i - 1])
         exit_now = bool(exit_base.iloc[i - 1])
         if idx[i] < segment.segment_start:

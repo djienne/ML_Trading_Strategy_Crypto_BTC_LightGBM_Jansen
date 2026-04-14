@@ -330,33 +330,33 @@ class LightGBMStrategy(IStrategy):
             (dataframe["date"] + pd.Timedelta(self.timeframe)).dt.month
             != dataframe["date"].dt.month
         )
-        dataframe.loc[
-            (dataframe["quantile"] >= self.ENTRY_QUANTILE) & ~is_grace & ~is_month_end,
-            "enter_long",
-        ] = 1
+        entry_signal = (
+            (dataframe["quantile"] >= self.ENTRY_QUANTILE)
+            & ~is_grace
+            & ~is_month_end
+        )
+        # Freqtrade reads the latest row for entries, so shift by one candle
+        # to act on the last fully-closed bar instead of the in-progress one.
+        entry_signal = entry_signal.shift(1, fill_value=False)
+        dataframe["enter_long"] = 0
+        dataframe.loc[entry_signal, "enter_long"] = 1
         # Suppress shorts: Freqtrade 2025.7 futures mode converts exit_long
         # to enter_short when flat — this prevents that.
         dataframe["enter_short"] = 0
-        # Clear signals on the last row (current unclosed candle) so the bot
-        # only acts on fully-closed candle data, matching the backtest.
-        dataframe.loc[dataframe.index[-1:], "enter_long"] = 0
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        # Exit long when quantile < 180 (drops below top 10%).
-        dataframe.loc[
-            dataframe["quantile"] < self.EXIT_QUANTILE,
-            "exit_long",
-        ] = 1
+        # Exit long when quantile < 90 (drops below top 10%).
+        exit_signal = dataframe["quantile"] < self.EXIT_QUANTILE
 
         # Force close on last bar of month (before model retraining).
         is_month_end = (
             (dataframe["date"] + pd.Timedelta(self.timeframe)).dt.month
             != dataframe["date"].dt.month
         )
-        dataframe.loc[is_month_end, "exit_long"] = 1
+        exit_signal = (exit_signal | is_month_end).shift(1, fill_value=False)
+        dataframe["exit_long"] = 0
+        dataframe.loc[exit_signal, "exit_long"] = 1
 
         dataframe["exit_short"] = 0
-        # Clear signals on the last row (current unclosed candle).
-        dataframe.loc[dataframe.index[-1:], "exit_long"] = 0
         return dataframe

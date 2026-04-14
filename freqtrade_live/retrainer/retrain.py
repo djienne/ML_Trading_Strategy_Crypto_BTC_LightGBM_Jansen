@@ -7,8 +7,8 @@ from the rolling cross-validation is deployed as the live model.
 
 Lifecycle
 ---------
-1. On startup: clean up orphaned .tmp files, then train immediately
-   if no model exists.
+1. On startup: clean up orphaned .tmp files, then full retrain only if
+   the published model/history are missing, stale, or the training code changed.
 2. Monthly (1st of each month): download latest BTC data, retrain,
    and save the last fold's model to the shared volume.
 """
@@ -62,7 +62,13 @@ FOLD_DIR = os.path.join(MODEL_DIR, "folds")
 MODEL_PATH = os.path.join(MODEL_DIR, "latest_model.txt")
 MODEL_INFO_PATH = os.path.join(MODEL_DIR, "model_info.json")
 PREDICTIONS_PATH = os.path.join(MODEL_DIR, "latest_predictions.feather")
+ARCHIVE_DIR = os.path.join(MODEL_DIR, "archive")
 DOWNLOAD_CONFIG_PATH = "/app/_download_config.json"
+TRAINING_SOURCE_PATHS = (
+    "/app/src/features.py",
+    "/app/src/modeling.py",
+    "/app/src/utils.py",
+)
 
 # Model hyperparams — must match the deployed grid search winner.
 BOOST_ROUNDS = 5000
@@ -106,6 +112,67 @@ def cleanup_tmp_files():
             logger.info("Cleaned up stale tmp: %s", tmp)
         except OSError as exc:
             logger.warning("Could not remove %s: %s", tmp, exc)
+
+
+def _archive_stamp(training_date: str) -> str:
+    ts = datetime.fromisoformat(training_date)
+    ts_utc = ts.astimezone(timezone.utc).replace(tzinfo=timezone.utc)
+    return ts_utc.strftime("%Y-%m-%dT%H-%M-%SZ")
+
+
+def _archive_snapshot(training_date: str, source: str, model_info: dict | None = None) -> bool:
+    snapshot_dir = os.path.join(ARCHIVE_DIR, _archive_stamp(training_date))
+    if os.path.isdir(snapshot_dir):
+        return False
+
+    required = [MODEL_PATH, MODEL_INFO_PATH, PREDICTIONS_PATH]
+    missing = [path for path in required if not os.path.exists(path)]
+    if missing:
+        logger.warning("Skipping archive snapshot; missing artifacts: %s", missing)
+        return False
+
+    model_info = model_info or {}
+    tmp_dir = snapshot_dir + ".tmp"
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    try:
+        shutil.copy2(MODEL_PATH, os.path.join(tmp_dir, "latest_model.txt"))
+        shutil.copy2(MODEL_INFO_PATH, os.path.join(tmp_dir, "model_info.json"))
+        shutil.copy2(PREDICTIONS_PATH, os.path.join(tmp_dir, "latest_predictions.feather"))
+        archive_meta = {
+            "archived_at": datetime.now(timezone.utc).isoformat(),
+            "source": source,
+            "training_date": training_date,
+            "interval": model_info.get("interval", INTERVAL),
+            "inference_symbol": model_info.get("inference_symbol", INFERENCE_SYMBOL),
+        }
+        with open(os.path.join(tmp_dir, "archive_meta.json"), "w") as fh:
+            json.dump(archive_meta, fh, indent=2)
+        os.makedirs(ARCHIVE_DIR, exist_ok=True)
+        shutil.move(tmp_dir, snapshot_dir)
+        logger.info("Archived live artifacts -> %s", snapshot_dir)
+        return True
+    except Exception:
+        logger.exception("Failed to archive live artifacts to %s", snapshot_dir)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return False
+
+
+def _archive_current_if_needed():
+    if not os.path.exists(MODEL_INFO_PATH):
+        return False
+    try:
+        with open(MODEL_INFO_PATH) as fh:
+            info = json.load(fh)
+        training_date = info.get("training_date")
+        if not training_date:
+            logger.warning("Current model_info.json has no training_date; skipping archive seed.")
+            return False
+        return _archive_snapshot(training_date, source="startup_existing", model_info=info)
+    except Exception:
+        logger.exception("Could not archive current live artifacts.")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -362,14 +429,18 @@ def save_model(last_fold_path, feature_names, val_ic, last_fold_val_ic, best_ite
             os.remove(tmp)
         raise
 
-    # Verify
+    # Verify — remove corrupted model and abort if check fails
     try:
         check = lgb.Booster(model_file=MODEL_PATH)
         if not check.feature_name():
-            logger.critical("Post-save check: model has no features!")
-    except Exception:
-        logger.exception("Post-save check: saved model file is unreadable!")
+            os.remove(MODEL_PATH)
+            raise RuntimeError("Post-save check: model has no features!")
+    except lgb.basic.LightGBMError:
+        if os.path.exists(MODEL_PATH):
+            os.remove(MODEL_PATH)
+        raise RuntimeError("Post-save check: saved model file is unreadable!")
 
+    _archive_snapshot(info["training_date"], source="publish", model_info=info)
     logger.info("Saved predictions -> model -> info: %s", MODEL_PATH)
 
 
@@ -443,11 +514,55 @@ def _predictions_sufficient():
                 len(preds), min_rows,
             )
             return False
-        logger.info("Prediction history OK: %d rows (need >= %d).", len(preds), min_rows)
+        # Check data freshness — stale predictions trigger full retrain
+        newest = pd.to_datetime(get_time_index(preds.index)).max()
+        if getattr(newest, "tzinfo", None) is not None:
+            newest = newest.tz_convert("UTC").tz_localize(None)
+        now_utc = pd.Timestamp.now(tz="UTC").tz_localize(None)
+        age_days = (now_utc - pd.Timestamp(newest)).days
+        if age_days > 7:
+            logger.warning("Prediction history too stale: newest is %d days old.", age_days)
+            return False
+        logger.info("Prediction history OK: %d rows (need >= %d), %d days old.", len(preds), min_rows, age_days)
         return True
     except Exception:
         logger.exception("Could not validate prediction history.")
         return False
+
+
+def _load_last_train_month():
+    if not os.path.exists(MODEL_INFO_PATH):
+        return None
+    try:
+        with open(MODEL_INFO_PATH) as fh:
+            info = json.load(fh)
+        return datetime.fromisoformat(info["training_date"]).strftime("%Y-%m")
+    except Exception:
+        logger.exception("Could not read last training month from model_info.json")
+        return None
+
+
+def _training_sources_changed():
+    if not os.path.exists(MODEL_PATH):
+        return True
+    try:
+        model_mtime = os.path.getmtime(MODEL_PATH)
+    except OSError:
+        return True
+
+    for path in TRAINING_SOURCE_PATHS:
+        try:
+            source_mtime = os.path.getmtime(path)
+        except OSError:
+            logger.warning("Could not stat training dependency %s; forcing full retrain.", path)
+            return True
+        if source_mtime > model_mtime:
+            logger.info(
+                "Training source %s is newer than the published model; full retrain required.",
+                path,
+            )
+            return True
+    return False
 
 
 def should_train_now(last_train_month):
@@ -470,34 +585,29 @@ def main():
     )
 
     cleanup_tmp_files()
+    _archive_current_if_needed()
 
-    # Remove the old model so the trader disables signals until retrain
-    # completes. This prevents trading with a stale model on startup.
-    if os.path.exists(MODEL_PATH):
-        os.remove(MODEL_PATH)
-        logger.info("Removed stale model — trader will wait for fresh retrain.")
+    model_exists = os.path.exists(MODEL_PATH)
+    predictions_ok = _predictions_sufficient()
+    sources_changed = _training_sources_changed() if model_exists else True
 
-    # Always retrain on startup to pick up code/feature changes.
-    # Use fast last-fold-only if prediction history has enough data;
-    # otherwise do a full retrain to generate/rebuild the prediction history.
-    if _predictions_sufficient():
-        logger.info("Startup retrain (last fold only) ...")
-        ok = run_startup_retrain()
+    if model_exists and predictions_ok and not sources_changed:
+        logger.info("Existing model and prediction history are healthy; skipping startup retrain.")
+        last_train_month = _load_last_train_month()
     else:
-        logger.info("Insufficient prediction history — full retrain required ...")
-        ok = run_pipeline()
-    if ok:
-        last_train_month = datetime.now(timezone.utc).strftime("%Y-%m")
-    else:
-        logger.error("Startup retrain failed; using existing model if available.")
-        last_train_month = None
-        if os.path.exists(MODEL_INFO_PATH):
-            try:
-                with open(MODEL_INFO_PATH) as fh:
-                    info = json.load(fh)
-                last_train_month = datetime.fromisoformat(info["training_date"]).strftime("%Y-%m")
-            except Exception:
-                pass
+        if not model_exists:
+            reason = "no published model"
+        elif not predictions_ok:
+            reason = "prediction history missing, sparse, or stale"
+        else:
+            reason = "training source changed since the last model publish"
+
+        logger.info("Startup full retrain required: %s.", reason)
+        if run_pipeline():
+            last_train_month = datetime.now(timezone.utc).strftime("%Y-%m")
+        else:
+            logger.error("Startup retrain failed; using existing model if available.")
+            last_train_month = _load_last_train_month()
 
     while True:
         try:

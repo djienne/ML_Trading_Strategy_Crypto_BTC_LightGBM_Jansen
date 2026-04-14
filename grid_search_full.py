@@ -38,6 +38,16 @@ RESULTS_CSV = "grid_search_results.csv"
 # Load data once
 print(f"Loading {TRAIN_SYMBOLS} {INTERVAL} data...", flush=True)
 df = load_data_multi(FEATHER_DIR, TRAIN_SYMBOLS, INTERVAL)
+
+if BAR_TYPE == "volume":
+    from src.bars import build_volume_bars
+    volume_size = config.get("volume_bar_size")
+    print(f"Building volume bars (size={volume_size})...", flush=True)
+    df = build_volume_bars(df, volume_size)
+    if df is None or df.empty:
+        print("Error: No volume bars generated.")
+        sys.exit(1)
+
 features_df = engineer_features(df, interval=INTERVAL, bar_type=BAR_TYPE, feature_flags=FEATURE_FLAGS)
 data = prepare_target(df, features_df, interval=INTERVAL, bar_type=BAR_TYPE, feature_flags=FEATURE_FLAGS)
 data = data.sort_index()

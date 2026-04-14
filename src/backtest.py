@@ -406,7 +406,12 @@ def backtest(
         rule = "long top / short bottom"
     else:
         if resolved_side == "auto":
-            resolved_side = "long" if target_quantile > bins / 2 else "short"
+            # high direction: top bin is long. low direction: bottom bin is long.
+            if direction == "high":
+                resolved_side = "long" if target_quantile > bins / 2 else "short"
+            else:
+                resolved_side = "long" if target_quantile <= bins / 2 else "short"
+
         if resolved_side == "longshort":
             opposite_quantile = bins - target_quantile + 1
             if opposite_quantile >= target_quantile:
@@ -415,10 +420,11 @@ def backtest(
                 rule = f"quantile >= {target_quantile} long / <= {opposite_quantile} short"
         else:
             comparator = ">=" if resolved_side == "long" else "<="
+            if direction == "low" and resolved_side == "long": comparator = "<="
+            if direction == "low" and resolved_side == "short": comparator = ">="
             rule = f"quantile {comparator} {target_quantile} ({resolved_side}, {direction})"
     print(f"Signal setup: scope={scope_used}, bins={bins}, rule={rule}.")
 
-    _hysteresis_pnl_done = False
     if exit_quantile is not None and resolved_side == "long":
         # Hysteresis path: compute_signal_returns() handles quantiles internally.
         # This ensures the CLI backtest matches the grid search exactly.
@@ -464,7 +470,7 @@ def backtest(
             perf["cum_net"] = (1 + perf["strategy_net"]).cumprod() - 1
             plot_equity_curve(perf, plot_path, title=f"Hysteresis {plot_label} (e={target_quantile}, x={exit_quantile})")
 
-        _hysteresis_pnl_done = True
+        return # Prevent fallthrough to non-hysteresis reporting
     else:
         # Non-hysteresis paths need add_quantile_labels() for quantile assignment
         predictions = add_quantile_labels(
@@ -494,14 +500,13 @@ def backtest(
         else:
             raise ValueError(f"Unsupported side: {resolved_side}")
 
-    if not _hysteresis_pnl_done:
-        predictions["strategy_gross"] = predictions["signal"] * predictions["target"]
+    predictions["strategy_gross"] = predictions["signal"] * predictions["target"]
 
-        predictions["prev_signal"] = predictions.groupby("symbol")["signal"].shift(1).fillna(0)
-        predictions["trades"] = (predictions["signal"] - predictions["prev_signal"]).abs()
-        predictions["costs"] = predictions["trades"] * fee
+    predictions["prev_signal"] = predictions.groupby("symbol")["signal"].shift(1).fillna(0)
+    predictions["trades"] = (predictions["signal"] - predictions["prev_signal"]).abs()
+    predictions["costs"] = predictions["trades"] * fee
 
-        predictions["strategy_net"] = predictions["strategy_gross"] - predictions["costs"]
+    predictions["strategy_net"] = predictions["strategy_gross"] - predictions["costs"]
 
     alpha_series = None
     alpha_window, alpha_min_periods, alpha_window_label = resolve_alpha_params(

@@ -470,6 +470,23 @@ def backtest(
             perf["cum_net"] = (1 + perf["strategy_net"]).cumprod() - 1
             plot_equity_curve(perf, plot_path, title=f"Hysteresis {plot_label} (e={target_quantile}, x={exit_quantile})")
 
+        if alpha_plot_path:
+            alpha_window, alpha_min_periods, alpha_window_label = resolve_alpha_params(
+                interval,
+                bar_type,
+                predictions["timestamp"],
+            )
+            alpha_series = compute_alpha_factor(
+                predictions,
+                window=alpha_window,
+                min_periods=alpha_min_periods,
+            )
+            prefix = f"{plot_label} " if plot_label else ""
+            alpha_title = (
+                f"{prefix}Alpha Factor ({rule}, window={alpha_window_label}, scope={scope_used})"
+            )
+            plot_alpha_factor(alpha_series, alpha_plot_path, title=alpha_title)
+
         return # Prevent fallthrough to non-hysteresis reporting
     else:
         # Non-hysteresis paths need add_quantile_labels() for quantile assignment

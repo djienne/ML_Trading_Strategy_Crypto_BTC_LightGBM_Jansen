@@ -104,6 +104,7 @@ FEATURE_FLAGS = {
 # Schedule
 CHECK_INTERVAL_SECONDS = 3600  # poll once per hour
 TRAIN_DAY_OF_MONTH = 1
+TRAIN_HEARTBEAT_SECONDS = 30
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +121,10 @@ def cleanup_tmp_files():
             logger.info("Cleaned up stale tmp: %s", tmp)
         except OSError as exc:
             logger.warning("Could not remove %s: %s", tmp, exc)
+
+
+def _training_progress(message):
+    logger.info("[train] %s", message)
 
 
 def _archive_stamp(training_date: str) -> str:
@@ -341,6 +346,12 @@ def train_model(model_data, last_fold_only=False):
     if os.path.isdir(FOLD_DIR):
         shutil.rmtree(FOLD_DIR)
     os.makedirs(FOLD_DIR, exist_ok=True)
+    logger.info(
+        "Starting rolling CV training via src.modeling.train_and_predict "
+        "(last_fold_only=%s, heartbeat=%ss).",
+        last_fold_only,
+        TRAIN_HEARTBEAT_SECONDS,
+    )
 
     # Use the exact same function as `python main.py train`
     predictions, train_meta = train_and_predict(
@@ -356,6 +367,8 @@ def train_model(model_data, last_fold_only=False):
         feature_fraction=FEATURE_FRACTION,
         learning_rate=LEARNING_RATE,
         last_fold_only=last_fold_only,
+        progress=_training_progress,
+        heartbeat_seconds=TRAIN_HEARTBEAT_SECONDS,
     )
 
     # Find the last fold model — this is the one trained on the most

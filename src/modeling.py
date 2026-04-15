@@ -1,5 +1,7 @@
 import gc
 import os
+import threading
+import time
 
 import lightgbm as lgb
 import numpy as np
@@ -14,6 +16,73 @@ def ic_lgbm(preds, train_data):
     if np.isnan(ic):
         ic = 0.0
     return "ic", ic, True
+
+
+def _default_progress(message):
+    print(message, flush=True)
+
+
+def _emit_progress(progress, message):
+    sink = progress or _default_progress
+    sink(message)
+
+
+def _format_eval_summary(evaluation_result_list):
+    if not evaluation_result_list:
+        return None
+
+    parts = []
+    for result in evaluation_result_list[:2]:
+        data_name = result[0]
+        metric_name = result[1]
+        metric_value = result[2]
+        parts.append(f"{data_name}.{metric_name}={metric_value:.5f}")
+    return ", ".join(parts) if parts else None
+
+
+def _make_iteration_progress_callback(state):
+    def _callback(env):
+        state["iteration"] = env.iteration + 1
+        best_iteration = getattr(env.model, "best_iteration", None)
+        if best_iteration is not None and best_iteration > 0:
+            state["best_iteration"] = int(best_iteration)
+        eval_summary = _format_eval_summary(env.evaluation_result_list)
+        if eval_summary:
+            state["eval_summary"] = eval_summary
+
+    _callback.order = 30
+    return _callback
+
+
+def _start_training_heartbeat(progress, fold_num, total_folds, rounds, state, heartbeat_seconds):
+    if heartbeat_seconds is None or heartbeat_seconds <= 0:
+        return None, None
+
+    stop_event = threading.Event()
+
+    def _heartbeat():
+        started_at = time.monotonic()
+        while not stop_event.wait(heartbeat_seconds):
+            elapsed = int(time.monotonic() - started_at)
+            message = (
+                f"  Fold {fold_num}/{total_folds}: training in progress "
+                f"({elapsed}s elapsed"
+            )
+            iteration = state.get("iteration")
+            best_iteration = state.get("best_iteration")
+            eval_summary = state.get("eval_summary")
+            if iteration is not None:
+                message += f", iter={iteration}/{rounds}"
+            if best_iteration is not None:
+                message += f", best_iter={best_iteration}"
+            if eval_summary:
+                message += f", {eval_summary}"
+            message += ")"
+            _emit_progress(progress, message)
+
+    thread = threading.Thread(target=_heartbeat, name=f"lgb-fold-{fold_num}-heartbeat", daemon=True)
+    thread.start()
+    return stop_event, thread
 
 
 def _calendar_month_splits(timestamps, train_months=12, embargo=20, symbols=None):
@@ -81,8 +150,10 @@ def train_and_predict(
     feature_fraction=0.5,
     learning_rate=0.01,
     last_fold_only=False,
+    progress=None,
+    heartbeat_seconds=30,
 ):
-    print("Starting model training (calendar-month rolling window)...")
+    _emit_progress(progress, "Starting model training (calendar-month rolling window)...")
     data = data.sort_index()
 
     target_col = "fwd1bar"
@@ -91,14 +162,18 @@ def train_and_predict(
 
     feature_cols = [c for c in data.columns if c != target_col]
     symbol_count = pd.Index(get_symbol_key(data.index)).nunique()
-    print(
+    _emit_progress(
+        progress,
         f"Training data: {len(data)} rows, {symbol_count} symbol(s), "
-        f"{len(feature_cols)} features."
+        f"{len(feature_cols)} features.",
     )
     if resume:
-        print(f"Training mode: resume (+{continue_rounds} rounds per fold when available).")
+        _emit_progress(
+            progress,
+            f"Training mode: resume (+{continue_rounds} rounds per fold when available).",
+        )
     else:
-        print("Training mode: fresh models per fold.")
+        _emit_progress(progress, "Training mode: fresh models per fold.")
 
     params = dict(
         objective="regression",
@@ -120,15 +195,21 @@ def train_and_predict(
     splits = _calendar_month_splits(timestamps, train_months=train_months, embargo=20, symbols=symbols)
 
     if not splits:
-        print(f"Warning: Insufficient data for {train_months}-month train + 1-month test.")
-        print(f"Need at least {train_months + 1} calendar months of data.")
+        _emit_progress(
+            progress,
+            f"Warning: Insufficient data for {train_months}-month train + 1-month test.",
+        )
+        _emit_progress(
+            progress,
+            f"Need at least {train_months + 1} calendar months of data.",
+        )
         return pd.DataFrame(), {"last_best_iteration": None}
 
     total_folds = len(splits)
-    print(f"Generated {total_folds} calendar-month folds.")
+    _emit_progress(progress, f"Generated {total_folds} calendar-month folds.")
 
     if last_fold_only:
-        print(f"Training last fold only (fold {total_folds}/{total_folds}).")
+        _emit_progress(progress, f"Training last fold only (fold {total_folds}/{total_folds}).")
         splits = splits[-1:]
 
     all_predictions = []
@@ -138,11 +219,12 @@ def train_and_predict(
         fold_num = total_folds if last_fold_only else fold + 1
         train_ts = timestamps[train_mask]
         test_ts = timestamps[test_mask]
-        print(
+        _emit_progress(
+            progress,
             f"Fold {fold_num}/{total_folds}: "
             f"train {train_ts.min().strftime('%Y-%m-%d')} -> "
             f"{train_ts.max().strftime('%Y-%m-%d')} ({train_mask.sum()} rows), "
-            f"test {test_ts.min().strftime('%Y-%m')} ({test_mask.sum()} rows)"
+            f"test {test_ts.min().strftime('%Y-%m')} ({test_mask.sum()} rows)",
         )
 
         train_data_fold = data.iloc[np.where(train_mask)[0]]
@@ -175,23 +257,49 @@ def train_and_predict(
             init_path = os.path.join(model_dir, f"fold_{fold_num:02d}.txt")
             if os.path.exists(init_path):
                 init_model = init_path
-                print(f"  Fold {fold_num}: resuming from {init_path} (+{continue_rounds} rounds)")
+                _emit_progress(
+                    progress,
+                    f"  Fold {fold_num}: resuming from {init_path} (+{continue_rounds} rounds)",
+                )
 
         rounds = continue_rounds if init_model else num_boost_round
-        model = lgb.train(
-            params,
-            lgb_train,
-            num_boost_round=rounds,
-            valid_sets=[lgb_train, lgb_eval],
-            feval=ic_lgbm,
-            callbacks=callbacks,
-            init_model=init_model,
+        _emit_progress(
+            progress,
+            f"  Fold {fold_num}/{total_folds}: starting LightGBM training "
+            f"(rounds={rounds}, train_rows={len(X_train)}, val_rows={len(X_val)}, test_rows={len(X_test)})",
         )
+        heartbeat_state = {"iteration": 0, "best_iteration": None, "eval_summary": None}
+        callbacks.append(_make_iteration_progress_callback(heartbeat_state))
+        heartbeat_stop, heartbeat_thread = _start_training_heartbeat(
+            progress,
+            fold_num,
+            total_folds,
+            rounds,
+            heartbeat_state,
+            heartbeat_seconds,
+        )
+        fold_started_at = time.monotonic()
+        try:
+            model = lgb.train(
+                params,
+                lgb_train,
+                num_boost_round=rounds,
+                valid_sets=[lgb_train, lgb_eval],
+                feval=ic_lgbm,
+                callbacks=callbacks,
+                init_model=init_model,
+            )
+        finally:
+            if heartbeat_stop is not None:
+                heartbeat_stop.set()
+            if heartbeat_thread is not None:
+                heartbeat_thread.join(timeout=1.0)
 
         if model_dir:
             os.makedirs(model_dir, exist_ok=True)
             model_path = os.path.join(model_dir, f"fold_{fold_num:02d}.txt")
             model.save_model(model_path)
+            _emit_progress(progress, f"  Fold {fold_num}: saved model -> {model_path}")
 
         bi = model.best_iteration
         best_iter = bi if bi and bi > 0 else model.current_iteration()
@@ -213,7 +321,12 @@ def train_and_predict(
         ic, _ = spearmanr(y_test, preds)
         if np.isnan(ic):
             ic = 0.0
-        print(f"  Fold {fold_num} IC: {ic:.4f} val_IC: {val_ic:.4f} (best_iter={best_iter})")
+        fold_elapsed = time.monotonic() - fold_started_at
+        _emit_progress(
+            progress,
+            f"  Fold {fold_num} IC: {ic:.4f} val_IC: {val_ic:.4f} "
+            f"(best_iter={best_iter}, elapsed={fold_elapsed:.1f}s)",
+        )
         del model, lgb_train, lgb_eval
         gc.collect()
 

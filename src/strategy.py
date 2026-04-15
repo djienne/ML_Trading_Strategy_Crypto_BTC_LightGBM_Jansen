@@ -67,35 +67,48 @@ def main():
     backtest_parser = subparsers.add_parser("backtest", help="Backtest signals by quantile")
     backtest_parser.add_argument("--symbol", help="Override symbol")
     backtest_parser.add_argument("--interval", help="Override interval")
-    backtest_parser.add_argument("--bins", type=int, default=100, help="Number of quantiles")
+    backtest_parser.add_argument(
+        "--bins",
+        type=int,
+        default=None,
+        help="Number of quantiles. Default: use deployed artifact contract when available.",
+    )
     backtest_parser.add_argument(
         "--quantile",
         type=int,
-        default=100,
-        help="Entry quantile threshold (long uses >=). Default 100 = top bin with 100 bins.",
+        default=None,
+        help="Entry quantile threshold (long uses >=). Default: use deployed artifact contract.",
     )
     backtest_parser.add_argument(
         "--exit-quantile",
         type=int,
-        default=90,
-        help="Exit quantile threshold (exit long when <). Default 90 = drops below top 10%% with 100 bins.",
+        default=None,
+        help="Exit quantile threshold (exit long when <). Default: use deployed artifact contract.",
     )
     backtest_parser.add_argument(
         "--side",
         choices=["auto", "long", "short", "longshort"],
         default="long",
     )
-    backtest_parser.add_argument("--fee", type=float, default=0.0005,
-                                     help="One-way fee per trade (entry and exit each, default 0.05%%)")
-    backtest_parser.add_argument("--stoploss", type=float, default=-0.20,
-                                     help="Stoploss per trade (e.g. -0.20 = close if trade loses 20%%)")
+    backtest_parser.add_argument(
+        "--fee",
+        type=float,
+        default=None,
+        help="One-way fee per trade (entry and exit each). Default: use deployed artifact contract.",
+    )
+    backtest_parser.add_argument(
+        "--stoploss",
+        type=float,
+        default=None,
+        help="Stoploss per trade (e.g. -0.20 = close if trade loses 20%%). Default: use deployed artifact contract.",
+    )
     backtest_parser.add_argument("--ic-thresh", type=float, default=None,
                                      help="Skip bars where validation IC < threshold (e.g. 0.0)")
     backtest_parser.add_argument(
         "--direction",
         choices=["high", "low"],
-        default="high",
-        help="Hysteresis direction: high (buy top/sell lower) or low (buy bottom/sell higher).",
+        default=None,
+        help="Hysteresis direction. Default: use deployed artifact contract.",
     )
     backtest_parser.add_argument(
         "--quantile-scope",
@@ -196,7 +209,7 @@ def main():
             quantile_scope=args.quantile_scope,
             stoploss=args.stoploss,
             ic_thresh=args.ic_thresh,
-            train_months=config.get("train_months", 12),
+            train_months=None,
             direction=args.direction,
         )
     else:

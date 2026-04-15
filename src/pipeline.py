@@ -11,6 +11,17 @@ from src.data_io import load_data, load_data_multi, load_frame, save_frame, sele
 from src.evaluation import evaluate_predictions
 from src.features import engineer_features, prepare_target
 from src.modeling import train_and_predict
+from src.strategy_contract import (
+    DEFAULT_BINS,
+    DEFAULT_DIRECTION,
+    DEFAULT_ENTRY_QUANTILE,
+    DEFAULT_EXIT_QUANTILE,
+    DEFAULT_FEE_ASSUMPTION,
+    DEFAULT_QUANTILE_METHOD,
+    DEFAULT_STOPLOSS,
+    DEFAULT_TRAIN_MONTHS,
+    load_local_live_strategy_contract,
+)
 from src.utils import (
     get_symbol_key,
     get_train_symbols,
@@ -215,16 +226,16 @@ def run_backtest(
     config,
     target_symbol,
     interval,
-    bins=10,
+    bins=None,
     quantile=None,
     exit_quantile=None,
     side="auto",
-    fee=0.001,
+    fee=None,
     quantile_scope="auto",
     stoploss=None,
     ic_thresh=None,
     train_months=None,
-    direction="high",
+    direction=None,
 ):
     print(f"Backtest target: {target_symbol}")
     predictions, paths = load_predictions_for_symbol(config, target_symbol, interval)
@@ -239,34 +250,106 @@ def run_backtest(
         interval=interval,
         bar_type=bar_type,
     )
+    artifact_contract, artifact_path, artifact_match = load_local_live_strategy_contract(
+        interval=interval,
+        symbol=target_symbol,
+    )
+    if artifact_contract is not None:
+        print(f"Using deployed strategy contract from {artifact_path}.")
+    elif artifact_path and artifact_match is not None:
+        print(
+            "Live artifact contract exists but does not match this backtest "
+            f"(have {artifact_match['inference_symbol']} {artifact_match['interval']})."
+        )
+
+    def resolve_contract_value(name, cli_value, fallback):
+        if artifact_contract is not None:
+            artifact_value = artifact_contract[name]
+            if cli_value is None:
+                return artifact_value
+            if cli_value != artifact_value:
+                print(
+                    f"Warning: overriding artifact {name}={artifact_value!r} "
+                    f"with CLI value {cli_value!r}."
+                )
+            return cli_value
+        return fallback if cli_value is None else cli_value
+
+    resolved_bins = resolve_contract_value("bins", bins, DEFAULT_BINS)
+    resolved_quantile = resolve_contract_value("entry_quantile", quantile, DEFAULT_ENTRY_QUANTILE)
+    resolved_exit_quantile = resolve_contract_value(
+        "exit_quantile",
+        exit_quantile,
+        DEFAULT_EXIT_QUANTILE,
+    )
+    resolved_fee = resolve_contract_value("fee_assumption", fee, DEFAULT_FEE_ASSUMPTION)
+    resolved_stoploss = resolve_contract_value("stoploss", stoploss, DEFAULT_STOPLOSS)
+    resolved_train_months = resolve_contract_value("train_months", train_months, config.get("train_months", DEFAULT_TRAIN_MONTHS))
+    resolved_direction = resolve_contract_value("direction", direction, DEFAULT_DIRECTION)
+    resolved_quantile_method = (
+        artifact_contract["quantile_method"]
+        if artifact_contract is not None
+        else DEFAULT_QUANTILE_METHOD
+    )
     base_name = os.path.basename(paths["predictions_path"]).replace("_predictions.feather", "")
-    if quantile is None:
+    if resolved_quantile is None:
         rule_tag = "top_bottom"
+        filename_scope = scope_used
     else:
         resolved_side = side
         if resolved_side == "auto":
-            resolved_side = "long" if quantile > bins / 2 else "short"
-        rule_tag = f"q{quantile}_{resolved_side}_{direction}"
+            resolved_side = "long" if resolved_quantile > resolved_bins / 2 else "short"
+        rule_tag = f"q{resolved_quantile}_{resolved_side}_{resolved_direction}"
+        filename_scope = (
+            resolved_quantile_method
+            if resolved_exit_quantile is not None and resolved_side == "long"
+            else scope_used
+        )
 
-    plot_path = os.path.join("plot", f"{base_name}_equity_{rule_tag}_{bins}_{scope_used}.png")
-    alpha_plot_path = os.path.join("plot", f"{base_name}_alpha_{rule_tag}_{bins}_{scope_used}.png")
+    plot_path = os.path.join("plot", f"{base_name}_equity_{rule_tag}_{resolved_bins}_{filename_scope}.png")
+    alpha_plot_path = os.path.join("plot", f"{base_name}_alpha_{rule_tag}_{resolved_bins}_{filename_scope}.png")
+    config_path = os.path.join("plot", f"{base_name}_backtest_{rule_tag}_{resolved_bins}_{filename_scope}.json")
     plot_label = f"{target_symbol} {paths['bar_id']}"
+    os.makedirs("plot", exist_ok=True)
+    with open(config_path, "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "artifact_contract_path": artifact_path if artifact_contract is not None else None,
+                "interval": interval,
+                "target_symbol": target_symbol,
+                "bins": resolved_bins,
+                "entry_quantile": resolved_quantile,
+                "exit_quantile": resolved_exit_quantile,
+                "fee_assumption": resolved_fee,
+                "stoploss": resolved_stoploss,
+                "train_months": resolved_train_months,
+                "direction": resolved_direction,
+                "quantile_method": resolved_quantile_method,
+                "side": side,
+                "quantile_scope": quantile_scope,
+                "ic_thresh": ic_thresh,
+            },
+            fh,
+            indent=2,
+        )
+    print(f"Saved backtest config: {config_path}")
 
     backtest(
         predictions,
-        fee=fee,
-        bins=bins,
-        target_quantile=quantile,
-        exit_quantile=exit_quantile,
+        fee=resolved_fee,
+        bins=resolved_bins,
+        target_quantile=resolved_quantile,
+        exit_quantile=resolved_exit_quantile,
         side=side,
         quantile_scope=quantile_scope,
         interval=interval,
         bar_type=bar_type,
         plot_path=plot_path,
         plot_label=plot_label,
-        stoploss=stoploss,
+        stoploss=resolved_stoploss,
         ic_thresh=ic_thresh,
         alpha_plot_path=alpha_plot_path,
-        train_months=train_months,
-        direction=direction,
+        train_months=resolved_train_months,
+        direction=resolved_direction,
+        quantile_method=resolved_quantile_method,
     )

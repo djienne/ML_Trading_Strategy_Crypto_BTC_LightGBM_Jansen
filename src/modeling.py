@@ -122,7 +122,7 @@ def train_and_predict(
     if not splits:
         print(f"Warning: Insufficient data for {train_months}-month train + 1-month test.")
         print(f"Need at least {train_months + 1} calendar months of data.")
-        return pd.DataFrame()
+        return pd.DataFrame(), {"last_best_iteration": None}
 
     total_folds = len(splits)
     print(f"Generated {total_folds} calendar-month folds.")

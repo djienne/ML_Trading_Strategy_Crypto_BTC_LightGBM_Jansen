@@ -88,7 +88,7 @@ Note: CLI backtest result (187%) differs from grid search (257%) because the CLI
 ### Key design decisions for live parity
 
 - **Rolling quantile** (12-month window): quantile context matches current model's prediction distribution, not years-old models
-- **Startup retrain** (last fold only): every container restart retrains the latest model in ~30 seconds
+- **Artifact-owned strategy contract**: live strategy, replay, and CLI backtest read the deployed bins/entry/exit/train_months/stoploss settings from `model_info.json`
 - **Short suppression**: prevents Freqtrade from converting exit signals to short entries
 - **Unclosed candle clearing**: signals only act on fully-closed candle data
-- **Prediction history**: expanding quantile anchored by all historical fold predictions, trimmed to rolling window
+- **Prediction history**: rolling quantiles are anchored by historical fold predictions, trimmed to the current rolling window

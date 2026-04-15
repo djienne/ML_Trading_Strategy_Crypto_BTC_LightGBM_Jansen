@@ -22,7 +22,6 @@ python freqtrade_live/backtest_live_window.py --start 2026-04-04 --trades-csv tr
 from __future__ import annotations
 
 import argparse
-import ast
 import json
 import sys
 import time
@@ -45,7 +44,13 @@ if str(ROOT_DIR) not in sys.path:
 from src.backtest import _apply_stoploss
 from src.data_io import load_frame
 from src.features import engineer_features
-from src.utils import assign_decile_rolling, get_time_index, interval_to_minutes
+from src.signal_engine import (
+    compute_desired_position,
+    compute_prediction_quantiles,
+    shift_position_for_execution,
+)
+from src.strategy_contract import read_strategy_contract
+from src.utils import get_time_index, interval_to_minutes
 
 
 MODEL_DIR = SCRIPT_DIR / "shared" / "models"
@@ -53,22 +58,10 @@ ARCHIVE_DIR = MODEL_DIR / "archive"
 CURRENT_MODEL_PATH = MODEL_DIR / "latest_model.txt"
 CURRENT_INFO_PATH = MODEL_DIR / "model_info.json"
 CURRENT_PRED_PATH = MODEL_DIR / "latest_predictions.feather"
-STRATEGY_PATH = SCRIPT_DIR / "user_data" / "strategies" / "LightGBMStrategy.py"
 BINANCE_FUTURES_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
 
 DEFAULT_INITIAL_BALANCE = 1000.0
-DEFAULT_FEE = 0.0005
 FEATURE_WARMUP_BARS = 200
-
-
-@dataclass
-class StrategyConfig:
-    timeframe: str = "15m"
-    bins: int = 100
-    entry_quantile: int = 100
-    exit_quantile: int = 90
-    train_months: int = 12
-    stoploss: float = -0.20
 
 
 @dataclass
@@ -81,6 +74,13 @@ class ArtifactSnapshot:
     train_months: int
     feature_flags: dict[str, Any] | None
     best_iteration: int | None
+    bins: int
+    entry_quantile: int
+    exit_quantile: int
+    direction: str
+    stoploss: float
+    fee_assumption: float
+    quantile_method: str
     model_path: Path
     info_path: Path
     predictions_path: Path
@@ -116,8 +116,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fee",
         type=float,
-        default=DEFAULT_FEE,
-        help="One-way fee per entry/exit transition. Default: 0.0005 (0.05%%).",
+        default=None,
+        help="One-way fee per entry/exit transition. Default: use the artifact fee assumption.",
     )
     parser.add_argument(
         "--print-trades",
@@ -155,55 +155,32 @@ def ceil_to_interval(ts: pd.Timestamp, timeframe: str) -> pd.Timestamp:
     return floored + pd.Timedelta(minutes=interval_to_minutes(timeframe))
 
 
-def load_strategy_config() -> StrategyConfig:
-    tree = ast.parse(STRATEGY_PATH.read_text(encoding="utf-8"))
-    values: dict[str, Any] = {}
-
-    for node in tree.body:
-        if not isinstance(node, ast.ClassDef) or node.name != "LightGBMStrategy":
-            continue
-        for stmt in node.body:
-            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-                target = stmt.targets[0]
-                if isinstance(target, ast.Name) and target.id in {
-                    "timeframe",
-                    "BINS",
-                    "ENTRY_QUANTILE",
-                    "EXIT_QUANTILE",
-                    "TRAIN_MONTHS",
-                    "stoploss",
-                }:
-                    values[target.id] = ast.literal_eval(stmt.value)
-        break
-
-    return StrategyConfig(
-        timeframe=values.get("timeframe", "15m"),
-        bins=int(values.get("BINS", 100)),
-        entry_quantile=int(values.get("ENTRY_QUANTILE", 100)),
-        exit_quantile=int(values.get("EXIT_QUANTILE", 90)),
-        train_months=int(values.get("TRAIN_MONTHS", 12)),
-        stoploss=float(values.get("stoploss", -0.20)),
-    )
-
-
 def load_snapshot(info_path: Path, model_path: Path, predictions_path: Path, name: str, is_current: bool) -> ArtifactSnapshot:
     with open(info_path, encoding="utf-8") as fh:
         info = json.load(fh)
+    contract = read_strategy_contract(info)
 
     training_date = pd.Timestamp(info["training_date"])
     if training_date.tzinfo is not None:
         training_date = training_date.tz_convert("UTC").tz_localize(None)
 
-    timeframe = info.get("interval", "15m")
+    timeframe = contract["interval"]
     return ArtifactSnapshot(
         name=name,
         training_date=training_date,
         live_from=ceil_to_interval(training_date, timeframe),
         timeframe=timeframe,
-        inference_symbol=info.get("inference_symbol", "BTCUSDT"),
-        train_months=int(info.get("train_months", 12)),
-        feature_flags=info.get("feature_flags"),
-        best_iteration=info.get("best_iteration"),
+        inference_symbol=contract["inference_symbol"],
+        train_months=contract["train_months"],
+        feature_flags=contract["feature_flags"],
+        best_iteration=contract["best_iteration"],
+        bins=contract["bins"],
+        entry_quantile=contract["entry_quantile"],
+        exit_quantile=contract["exit_quantile"],
+        direction=contract["direction"],
+        stoploss=contract["stoploss"],
+        fee_assumption=contract["fee_assumption"],
+        quantile_method=contract["quantile_method"],
         model_path=model_path,
         info_path=info_path,
         predictions_path=predictions_path,
@@ -392,7 +369,6 @@ def build_trade_table(
 
 def replay_segment(
     segment: ReplaySegment,
-    strategy_cfg: StrategyConfig,
     candles: pd.DataFrame,
 ) -> pd.DataFrame:
     warmup = pd.Timedelta(minutes=interval_to_minutes(segment.snapshot.timeframe) * FEATURE_WARMUP_BARS)
@@ -423,49 +399,28 @@ def replay_segment(
     )
     returns = local.set_index("date")["ret1bar"].reindex(pred_series.index)
     history = load_prediction_history(segment.snapshot.predictions_path, segment.snapshot.inference_symbol)
-
-    bars_per_month = int(30.4375 * 24 * 60 / interval_to_minutes(segment.snapshot.timeframe))
-    q_window = bars_per_month * segment.snapshot.train_months
-    quantiles = assign_decile_rolling(
-        pd.concat([history[history.index < pred_series.index.min()].tail(q_window), pred_series]),
-        bins=strategy_cfg.bins,
-        window=q_window,
-    ).reindex(pred_series.index)
+    quantiles, _window = compute_prediction_quantiles(
+        pred_series,
+        segment.snapshot.bins,
+        interval=segment.snapshot.timeframe,
+        train_months=segment.snapshot.train_months,
+        quantile_method=segment.snapshot.quantile_method,
+        history=history,
+    )
+    desired_position, _valid = compute_desired_position(
+        quantiles,
+        pred_series.index,
+        segment.snapshot.timeframe,
+        segment.snapshot.entry_quantile,
+        segment.snapshot.exit_quantile,
+        direction=segment.snapshot.direction,
+    )
+    position_series = shift_position_for_execution(
+        desired_position,
+        live_from=segment.snapshot.live_from,
+    )
 
     idx = pred_series.index
-    is_grace = (idx.day == 1) & (idx.hour == 0)
-    is_month_end = ((idx + pd.Timedelta(segment.snapshot.timeframe)).month != idx.month)
-    entry_base = (
-        (quantiles >= strategy_cfg.entry_quantile)
-        & ~is_grace
-        & ~is_month_end
-    ).fillna(False)
-    exit_base = ((quantiles < strategy_cfg.exit_quantile) | is_month_end).fillna(False)
-
-    position = 0
-    position_series = pd.Series(0, index=idx, dtype="int64")
-    for i in range(1, len(idx)):
-        if idx[i] < segment.snapshot.live_from:
-            position = 0
-            position_series.iloc[i] = 0
-            continue
-
-        enter_now = bool(entry_base.iloc[i - 1])
-        exit_now = bool(exit_base.iloc[i - 1])
-        if idx[i] < segment.segment_start:
-            if position == 0 and enter_now:
-                position = 1
-            elif position == 1 and exit_now:
-                position = 0
-            position_series.iloc[i] = position
-            continue
-
-        if position == 0 and enter_now:
-            position = 1
-        elif position == 1 and exit_now:
-            position = 0
-        position_series.iloc[i] = position
-
     mask = (idx >= segment.segment_start) & (idx <= segment.segment_end)
     return pd.DataFrame(
         {
@@ -479,7 +434,6 @@ def replay_segment(
 
 def main() -> None:
     args = parse_args()
-    strategy_cfg = load_strategy_config()
     snapshots = discover_snapshots()
 
     timeframes = {snapshot.timeframe for snapshot in snapshots}
@@ -499,6 +453,22 @@ def main() -> None:
     )
     replay_end = floor_to_interval(end_requested, timeframe)
     segments, replay_start = build_segments(snapshots, start_requested, replay_end)
+    stoploss_values = {segment.snapshot.stoploss for segment in segments}
+    if len(stoploss_values) != 1:
+        raise SystemExit(
+            f"Mixed stoploss values across snapshots are not supported: {sorted(stoploss_values)}"
+        )
+    stoploss = stoploss_values.pop()
+
+    if args.fee is None:
+        fee_values = {segment.snapshot.fee_assumption for segment in segments}
+        if len(fee_values) != 1:
+            raise SystemExit(
+                "Mixed fee assumptions across snapshots. Pass --fee explicitly for replay."
+            )
+        fee = fee_values.pop()
+    else:
+        fee = args.fee
 
     if replay_start > replay_end:
         raise SystemExit(f"Replay start {replay_start} is after replay end {replay_end}.")
@@ -514,7 +484,7 @@ def main() -> None:
     candles = fetch_klines(inference_symbol, timeframe, fetch_start, replay_end)
     candles["ret1bar"] = candles["close"] / candles["open"] - 1.0
 
-    segment_frames = [replay_segment(segment, strategy_cfg, candles) for segment in segments]
+    segment_frames = [replay_segment(segment, candles) for segment in segments]
     replay_frame = pd.concat(segment_frames, ignore_index=True).sort_values("timestamp")
 
     timestamps = pd.DatetimeIndex(replay_frame["timestamp"])
@@ -525,19 +495,29 @@ def main() -> None:
     position_after_sl, returns_after_sl, sl_exit = _apply_stoploss(
         position_arr,
         returns_arr,
-        strategy_cfg.stoploss,
+        stoploss,
     )
     gross_arr = position_after_sl * returns_after_sl + sl_exit * returns_after_sl
     prev = np.empty_like(position_after_sl)
     prev[0] = 0
     prev[1:] = position_after_sl[:-1]
     trades_arr = np.abs(position_after_sl - prev)
-    net_arr = gross_arr - trades_arr * args.fee
+    net_arr = gross_arr - trades_arr * fee
 
     gross_return = float(np.prod(1 + gross_arr) - 1)
     net_return = float(np.prod(1 + net_arr) - 1)
     end_balance = args.initial_balance * (1 + net_return)
     trade_table = build_trade_table(timestamps, gross_arr, net_arr, position_after_sl, snapshot_labels)
+
+    strategy_triplets = {
+        (
+            segment.snapshot.bins,
+            segment.snapshot.entry_quantile,
+            segment.snapshot.exit_quantile,
+        )
+        for segment in segments
+    }
+    direction_values = {segment.snapshot.direction for segment in segments}
 
     print()
     print("Live-Artifact Replay")
@@ -547,9 +527,17 @@ def main() -> None:
     print(f"Requested start:   {start_requested}")
     print(f"Replay start:      {replay_start}")
     print(f"Replay end:        {timestamps.max() if len(timestamps) else replay_end}")
-    print(f"Fee:               {args.fee:.4%}")
-    print(f"Stoploss:          {strategy_cfg.stoploss:.2%}")
-    print(f"Bins / Entry / Exit: {strategy_cfg.bins} / {strategy_cfg.entry_quantile} / {strategy_cfg.exit_quantile}")
+    print(f"Fee:               {fee:.4%}")
+    print(f"Stoploss:          {stoploss:.2%}")
+    if len(strategy_triplets) == 1:
+        bins, entry_quantile, exit_quantile = next(iter(strategy_triplets))
+        print(f"Bins / Entry / Exit: {bins} / {entry_quantile} / {exit_quantile}")
+    else:
+        print("Bins / Entry / Exit: mixed by snapshot")
+    if len(direction_values) == 1:
+        print(f"Direction:         {next(iter(direction_values))}")
+    else:
+        print("Direction:         mixed by snapshot")
     print(f"Bars:              {len(timestamps)}")
     print(f"Closed trades:     {len(trade_table)}")
     print(f"Gross return:      {gross_return * 100:.4f}%")
@@ -564,7 +552,9 @@ def main() -> None:
         print(
             f"  - {segment.snapshot.name}{current_flag}: "
             f"trained {training_date}, live_from {live_from}, "
-            f"segment {segment.segment_start} -> {segment.segment_end}",
+            f"segment {segment.segment_start} -> {segment.segment_end}, "
+            f"bins={segment.snapshot.bins} entry={segment.snapshot.entry_quantile} "
+            f"exit={segment.snapshot.exit_quantile}",
         )
     if not trade_table.empty:
         print(f"First entry:       {trade_table.iloc[0]['entry_time']}")

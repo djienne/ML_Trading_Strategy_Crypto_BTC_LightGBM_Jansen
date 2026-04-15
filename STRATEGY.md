@@ -2,164 +2,125 @@
 
 ## Overview
 
-Long-only BTC/USDT strategy using a LightGBM gradient boosting model to predict
-1-bar forward returns on 15-minute candles. The model is trained on BTC+ETH data
-for more training samples and less overfitting, but trading signals are generated
-and executed only on BTC.
+Long-only BTC/USDT futures strategy using a LightGBM regression model on 15-minute candles.
+Training uses BTC + ETH for additional samples, while inference and trading use BTC only.
 
-## Model
+The repo now treats the deployed live setup as an artifact-owned contract. The published
+`model_info.json` contains both model settings and signal settings, and the live strategy,
+artifact replay, and CLI backtest all consume that same contract by default.
 
-| Parameter           | Value   |
-|---------------------|---------|
-| Objective           | Regression (predict `fwd1bar` = next-bar log return) |
-| Learning rate       | 0.01 (fixed, per Ch.12 reference) |
-| Num leaves          | 16 |
-| Min data in leaf    | 100 |
-| Feature fraction    | 0.5 |
-| Boosting rounds     | 5000 (with early stopping) |
-| Early stopping      | 50 rounds patience |
-| Seed                | 42 |
-| Device              | CPU (faster than GPU for this data size) |
+## Current Deployed Contract
 
-## Features (20 total)
+| Parameter | Value |
+|-----------|-------|
+| Interval | `15m` |
+| Inference symbol | `BTCUSDT` |
+| Train months | `12` |
+| Num leaves | `31` |
+| Min data in leaf | `50` |
+| Feature fraction | `0.5` |
+| Learning rate | `0.01` |
+| Bins | `100` |
+| Entry quantile | `100` |
+| Exit quantile | `90` |
+| Direction | `high` |
+| Stoploss | `-20%` |
+| Quantile method | `rolling` |
+| Fee assumption | `0.05%` per transition |
 
-- **Returns:** ret1bar through ret10bar (log returns over 1-10 bars)
-- **Technical indicators:** BOP, CCI, MFI, RSI, StochRSI, SlowK, SlowD, NATR
-- **Alpha factors:** alpha054 (close vs open rank correlation), alpha001 (expanding pct rank of returns)
+## Model Objective
+
+The target is **next-bar simple return**, not log return.
+
+- `ret1bar = close / open - 1`
+- `fwd1bar = ret1bar.shift(-1)`
+
+That means the model predicts the next bar's simple open-to-close return.
+
+## Features
+
+The current feature set is driven by `feature_flags` and includes:
+
+- Returns: `ret1bar` through `ret10bar` using simple returns
+- Indicators: `bop`, `cci`, `mfi`, `rsi`, `stochrsi`, `slowk`, `slowd`, `natr`
+- Alpha factors: `alpha054`, `alpha001`
+
+Feature generation is shared between offline training, live inference, and replay.
 
 ## Training
 
-### Cross-validation: Calendar-month rolling window
+Training uses calendar-month rolling cross-validation:
 
-- **Training window:** 12 calendar months (rolling forward)
-- **Test window:** 1 calendar month
-- **Embargo:** First 20 bars of each test month are skipped to prevent
-  feature rolling-window overlap with training data
-- **Train/val split:** 90/10 within each training fold for early stopping
-- **Training symbols:** BTC + ETH (multi-symbol for more data)
-- **Inference symbol:** BTC only
+- Train window: 12 calendar months
+- Test window: 1 calendar month
+- Embargo: first 20 bars per symbol in each test month
+- Validation split: last 10% of each training fold
+- Training symbols: BTC + ETH
+- Live inference symbol: BTC only
 
-### Schedule (live)
-
-- Model is retrained on the 1st of every month
-- Retrainer checks hourly; fires when `day >= 1` and hasn't trained this month
-- Uses `src/modeling.train_and_predict()` -- same code as backtest
+The main training path is `src/modeling.train_and_predict()`. Grid search and retraining
+both call that same function instead of reimplementing training logic.
 
 ## Signal Generation
 
-### Quantile assignment
+Predictions are converted to **rolling quantile bins**, not expanding quantiles. The
+rolling window length is derived from `train_months`, so the signal distribution reflects
+the currently deployed model regime instead of the entire historical archive.
 
-Predictions are converted to quantile bins using an **expanding percentile rank**
-(Fenwick tree, O(n log n), numba-accelerated). This avoids forward-looking bias
-since each bar's quantile only uses predictions seen so far.
+Entry and exit use a long-only hysteresis state machine:
 
-| Parameter     | Value |
-|---------------|-------|
-| Bins          | 200   |
-| Min periods   | 1000 (= bins * 5) |
-| Method        | Expanding pct rank via Fenwick tree |
+- Enter long when quantile is `>= 100`
+- Exit long when quantile falls below `90`
+- Force close on the last bar of each month
+- Block new entries during the first hour of the month
 
-### Entry / exit rules (hysteresis)
+The shared signal engine is used by:
 
-| Rule          | Condition |
-|---------------|-----------|
-| Enter long    | quantile >= 198 (top 1%) |
-| Exit long     | quantile < 180 (drops below top 10%) |
-| Direction     | Long only (`can_short = False`) |
+- offline hysteresis backtest
+- live strategy state derivation
+- live-artifact replay
 
-The hysteresis prevents whipsawing: once in a position, stay until the signal
-drops significantly (from top 1% all the way down to below top 10%).
+## Parity Boundaries
 
-### Monthly boundaries
+Two different parity claims matter:
 
-| Boundary           | Rule | Why |
-|--------------------|------|-----|
-| **Grace period**   | No new entries when `day == 1 AND hour == 0` (first hour of month) | Model is being retrained during this window |
-| **Month-end close**| Force close any open position on the last bar of the month | Clean slate before model retraining; prevents holding stale-model positions |
-| **Detection**      | `(timestamp + interval).month != timestamp.month` | Identifies the last bar before month rolls over |
+- **Signal parity**: given candles + artifact, offline and live paths should produce the same features, predictions, quantiles, and desired position state.
+- **Execution parity**: actual fills, slippage, order-book pricing, timeouts, and funding in Freqtrade/exchange behavior.
 
-Order of operations in the hysteresis loop (per bar):
-1. Check `is_month_end` -- force close if position is open
-2. Check `is_grace` -- skip entry/exit logic, hold current state (0 after month-end)
-3. Normal entry/exit quantile checks
+This repository is designed to make **signal parity** tight. It does **not** claim that the
+vectorized backtest is an execution-faithful simulation of live Binance futures trading.
 
-### Fee model
+## Execution Differences
 
-| Parameter     | Value |
-|---------------|-------|
-| Fee per trade | 0.05% (0.0005) |
-| Applied on    | Each position change (entry and exit counted separately) |
+The vectorized backtest remains an approximation:
 
-### Known backtest vs live approximations
+- Backtest stoploss is based on cumulative bar returns inside the signal engine.
+- Freqtrade stoploss is based on live unrealized PnL from the entry price.
+- Live trading uses Binance futures order placement, order-book pricing, and unfilled timeouts.
+- Funding is a live futures effect and is not fully modeled by the generic vectorized backtest.
 
-- **Stoploss mechanism:** The backtest tracks cumulative bar returns since entry and
-  caps at -20%. Freqtrade's native stoploss is price-based (triggers on unrealized
-  drawdown from entry). For 15-minute bars the difference is small (compounding
-  over a few bars ≈ linear), but in a flash crash spanning many bars they can diverge.
-- **Exit timing:** Backtest exits at bar close; Freqtrade uses limit/market orders
-  with potential slippage and timeouts.
-
-## Code Architecture
-
-### Single source of truth: `compute_signal_returns()`
-
-Signal computation is implemented **once** in `src/backtest.py:compute_signal_returns()`.
-This function is called by:
-- The CLI backtest (`python main.py backtest`)
-- The grid search (`grid_search_full.py`)
-
-This ensures identical results across all evaluation paths.
-
-### Key files
-
-| File | Purpose |
-|------|---------|
-| `src/modeling.py` | Model training with calendar-month rolling CV |
-| `src/backtest.py` | `compute_signal_returns()`, hysteresis signal loops, backtesting |
-| `src/features.py` | Feature engineering (20 features) |
-| `src/utils.py` | Expanding quantile via Fenwick tree |
-| `src/pipeline.py` | Orchestrates train/evaluate/backtest pipeline |
-| `src/strategy.py` | CLI argument parsing |
-| `grid_search_full.py` | Hyperparameter grid search |
-| `freqtrade_live/user_data/strategies/LightGBMStrategy.py` | Live Freqtrade strategy |
-| `freqtrade_live/retrainer/retrain.py` | Monthly model retrainer (Docker) |
-| `freqtrade_live/docker-compose.yml` | Docker Compose (trader + retrainer) |
-
-### Live deployment (Docker)
-
-Two containers via Docker Compose:
-1. **freqtrade** -- runs the `LightGBMStrategy`, loads model from shared volume
-2. **retrainer** -- monthly retraining, downloads latest data, saves model atomically
-
-Shared volume (`./shared/`) contains models, predictions, and model metadata.
-Atomic writes (`.tmp` + `os.replace()`) ensure crash safety.
-
-## Backtest Results
-
-Grid search winner (300 configs, ~6 years of 15m BTC data, Dec 2020 — Mar 2026):
-- **Net return:** +283.81%
-- **Trades:** 1,380
-- **Sharpe ratio:** 1.41
-- **Config:** tm=12, L=16, ff=0.5, mdil=100, bins=200, entry>=198, exit<180
-
-Chosen for neighborhood robustness: adjacent parameter values (ff=0.25→+202%,
-mdil=50→+197%, mdil=200→+147%) degrade gradually, not as a cliff.
-
-**Selection bias caveat:** The grid search evaluates ~75K candidates on the same
-historical sample with no final holdout or nested validation. Top results are
-likely optimistic for live deployment. Consider reserving the last 6-12 months
-as a true out-of-sample test before deploying any winner.
-
-## CLI Usage
+For artifact-aware validation of the live stack, use:
 
 ```bash
-# Train with deployed config (all defaults match the winner)
-python main.py train --retrain --boost-rounds 5000
-
-# Backtest (all defaults match the winner)
-python main.py backtest
-    --fee 0.0005 --side long
-
-# Grid search (all combinations)
-python grid_search_full.py
+python freqtrade_live/backtest_live_window.py --start 2026-04-04
 ```
+
+## Artifact Contract
+
+The published `model_info.json` now carries the live contract fields used by all consumers:
+
+- `interval`
+- `inference_symbol`
+- `feature_flags`
+- `best_iteration`
+- `train_months`
+- `bins`
+- `entry_quantile`
+- `exit_quantile`
+- `direction`
+- `stoploss`
+- `fee_assumption`
+- `quantile_method`
+
+If required contract keys are missing, live/replay now reject the artifact instead of
+quietly falling back to stale hardcoded settings.

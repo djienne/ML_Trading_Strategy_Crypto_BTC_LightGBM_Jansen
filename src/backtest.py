@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 
 from src.evaluation import add_quantile_labels
+from src.signal_engine import compute_desired_position, compute_prediction_quantiles
 from src.utils import estimate_bar_minutes, get_symbol_key, get_time_index, interval_to_minutes, resolve_quantile_scope
 
 try:
@@ -14,60 +15,6 @@ except ImportError:
         if fn is not None:
             return fn
         return lambda f: f
-
-
-@_njit(cache=True)
-def _hysteresis_signal(q_values, entry_q, exit_q, is_grace=None, is_month_end=None):
-    """Numba-accelerated hysteresis signal loop with monthly boundaries.
-
-    If is_grace/is_month_end boolean arrays are provided, enforces:
-    - is_grace: no new entries (hold existing position at 0)
-    - is_month_end: force close any open position, no re-entry on same bar
-    """
-    n = len(q_values)
-    out = np.zeros(n, dtype=np.int64)
-    pos = 0
-    for i in range(n):
-        # Force close on last bar of month — skip entry check on this bar
-        if is_month_end is not None and is_month_end[i] and pos == 1:
-            pos = 0
-            out[i] = pos
-            continue
-
-        # Grace period: don't open new positions
-        if is_grace is not None and is_grace[i]:
-            out[i] = pos
-            continue
-
-        val = q_values[i]
-        if pos == 0 and val >= entry_q:
-            pos = 1
-        elif pos == 1 and val < exit_q:
-            pos = 0
-        out[i] = pos
-    return out
-
-@_njit(cache=True)
-def _hysteresis_signal_low(q_values, entry_q, exit_q, is_grace=None, is_month_end=None):
-    """Buy at bottom bin, exit when rises above exit_q. With monthly boundaries."""
-    n = len(q_values)
-    out = np.zeros(n, dtype=np.int64)
-    pos = 0
-    for i in range(n):
-        if is_month_end is not None and is_month_end[i] and pos == 1:
-            pos = 0
-            out[i] = pos
-            continue
-        if is_grace is not None and is_grace[i]:
-            out[i] = pos
-            continue
-        val = q_values[i]
-        if pos == 0 and val <= entry_q:
-            pos = 1
-        elif pos == 1 and val > exit_q:
-            pos = 0
-        out[i] = pos
-    return out
 
 
 @_njit(cache=True)
@@ -113,7 +60,8 @@ def _apply_stoploss(signal, returns, stoploss):
 def compute_signal_returns(pred_series, target_series, timestamps,
                            bins, entry_q, exit_q, interval, fee,
                            direction="high", stoploss=None,
-                           quantile_window=None):
+                           quantile_window=None,
+                           quantile_method=None):
     """Compute long-only hysteresis returns with monthly boundaries.
 
     This is the single shared function used by both the backtest CLI
@@ -138,27 +86,27 @@ def compute_signal_returns(pred_series, target_series, timestamps,
     -------
     dict with: trades, gross, net, sharpe, valid_mask, signal, quantiles
     """
-    from src.utils import assign_decile_expanding, assign_decile_rolling
-
     pred_s = pd.Series(pred_series, index=timestamps) if not isinstance(pred_series, pd.Series) else pred_series
-    if quantile_window is not None:
-        quantiles = assign_decile_rolling(pred_s, bins=bins, window=quantile_window)
-    else:
-        quantiles = assign_decile_expanding(pred_s, bins=bins)
+    if quantile_method is None:
+        quantile_method = "rolling" if quantile_window is not None else "expanding"
+    quantiles, _window = compute_prediction_quantiles(
+        pred_s,
+        bins,
+        window=quantile_window,
+        quantile_method=quantile_method,
+    )
     valid = quantiles.notna()
     valid_mask = valid.values if hasattr(valid, 'values') else np.asarray(valid)
-    q_arr = quantiles[valid].values.astype(np.int64)
     t_arr = np.asarray(target_series)[valid_mask]
-
-    ts_all = pd.DatetimeIndex(timestamps)
-    ts_valid = ts_all[valid_mask]
-    is_grace = np.array((ts_valid.day == 1) & (ts_valid.hour == 0))
-    is_month_end = np.array((ts_valid + pd.Timedelta(interval)).month != ts_valid.month)
-
-    if direction == "high":
-        sig = _hysteresis_signal(q_arr, entry_q, exit_q, is_grace, is_month_end)
-    else:
-        sig = _hysteresis_signal_low(q_arr, entry_q, exit_q, is_grace, is_month_end)
+    desired_position, _valid = compute_desired_position(
+        quantiles,
+        timestamps,
+        interval,
+        entry_q,
+        exit_q,
+        direction=direction,
+    )
+    sig = desired_position[valid].to_numpy(dtype=np.int64)
 
     # Empty signal guard (e.g. all quantiles NaN on tiny dataset)
     if len(sig) == 0:
@@ -289,6 +237,7 @@ def score_hysteresis_predictions(
     stoploss=None,
     ic_thresh=None,
     train_months=None,
+    quantile_method="rolling",
 ):
     """Pure helper to score predictions using the hysteresis engine.
 
@@ -327,6 +276,7 @@ def score_hysteresis_predictions(
         bins, target_quantile, exit_quantile, interval, fee,
         direction=direction, stoploss=stoploss,
         quantile_window=q_window,
+        quantile_method=quantile_method,
     )
 
     # Map results back — when IC filtering is active, results are on the
@@ -386,6 +336,7 @@ def backtest(
     ic_thresh=None,
     train_months=None,
     direction="high",
+    quantile_method="rolling",
 ):
     print("\nStarting Backtest...")
     if predictions.empty:
@@ -423,18 +374,17 @@ def backtest(
             if direction == "low" and resolved_side == "long": comparator = "<="
             if direction == "low" and resolved_side == "short": comparator = ">="
             rule = f"quantile {comparator} {target_quantile} ({resolved_side}, {direction})"
-    print(f"Signal setup: scope={scope_used}, bins={bins}, rule={rule}.")
-
     if exit_quantile is not None and resolved_side == "long":
         # Hysteresis path: compute_signal_returns() handles quantiles internally.
         # This ensures the CLI backtest matches the grid search exactly.
-        if scope_used != "expanding":
-            print(f"Note: hysteresis mode uses expanding quantiles (ignoring scope={scope_used}).")
+        print(f"Signal setup: quantiles={quantile_method}, bins={bins}, rule={rule}.")
+        if scope_used != quantile_method:
+            print(f"Note: hysteresis mode ignores scope={scope_used} and uses {quantile_method} quantiles.")
 
         predictions, m = score_hysteresis_predictions(
             predictions, bins, target_quantile, exit_quantile, interval, fee,
             direction=direction, stoploss=stoploss, ic_thresh=ic_thresh,
-            train_months=train_months
+            train_months=train_months, quantile_method=quantile_method
         )
 
         if predictions is None:
@@ -489,6 +439,7 @@ def backtest(
 
         return # Prevent fallthrough to non-hysteresis reporting
     else:
+        print(f"Signal setup: scope={scope_used}, bins={bins}, rule={rule}.")
         # Non-hysteresis paths need add_quantile_labels() for quantile assignment
         predictions = add_quantile_labels(
             predictions,

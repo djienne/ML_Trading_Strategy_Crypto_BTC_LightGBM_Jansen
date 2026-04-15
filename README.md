@@ -190,6 +190,12 @@ Equity curve and standardized-signal (alpha) plots are saved under `plot/` for e
 `--quantile` is a threshold: long uses `>=` and short uses `<=` the chosen bin. `--side longshort`
 uses upper/lower tails (and skips the short leg if the tails overlap).
 
+When `freqtrade_live/shared/models/model_info.json` is present and matches the requested
+symbol/interval, the CLI backtest now defaults to that published live contract for
+`bins`, entry/exit quantiles, fee, stoploss, direction, and training-window assumptions.
+CLI overrides still work, but the backtest prints a warning and saves the resolved
+configuration to `plot/*_backtest_*.json` for traceability.
+
 ## Artifacts
 
 The pipeline persists intermediate outputs so you can resume after a restart:
@@ -218,4 +224,5 @@ When training on multiple symbols, `{symbol}` is `ALL` for the features, predict
 - Candle intervals shorter than 1 month are supported; the README examples assume `1m`.
 - Quantile assignment defaults to `timestamp` for multi-symbol data, `date` for intraday single-symbol data, and `global` for daily+ or volume-bar single-symbol data; override with `--quantile-scope` if needed.
 - The backtest is a vectorized approximation meant for quick signal sanity checks, not a full execution-quality simulation.
+- `freqtrade_live/backtest_live_window.py` is the artifact-aware replay tool to use when checking live parity instead of only offline signal PnL.
 - The backtest alpha factor is a 1-day rolling z-score of the trading signal per symbol (min 60 minutes, both scaled to bars), scaled by 0.01 and averaged by timestamp for plotting.

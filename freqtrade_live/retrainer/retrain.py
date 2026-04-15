@@ -36,6 +36,7 @@ sys.path.insert(0, "/app")
 from src.features import engineer_features, prepare_target
 from src.data_io import load_data, load_data_multi, load_frame, save_frame, select_symbol
 from src.modeling import train_and_predict
+from src.strategy_contract import build_strategy_contract
 from src.utils import get_time_index, interval_to_minutes
 
 # ---------------------------------------------------------------------------
@@ -78,6 +79,13 @@ MIN_DATA_IN_LEAF = 50
 FEATURE_FRACTION = 0.5
 LEARNING_RATE = 0.01
 MIN_TRAINING_ROWS = 10_000
+BINS = 100
+ENTRY_QUANTILE = 100
+EXIT_QUANTILE = 90
+DIRECTION = "high"
+STOPLOSS = -0.20
+FEE_ASSUMPTION = 0.0005
+QUANTILE_METHOD = "rolling"
 
 # All features enabled (must match config.json feature_flags).
 FEATURE_FLAGS = {
@@ -187,6 +195,13 @@ def _expected_model_config() -> dict:
         "feature_fraction": FEATURE_FRACTION,
         "learning_rate": LEARNING_RATE,
         "feature_flags": FEATURE_FLAGS,
+        "bins": BINS,
+        "entry_quantile": ENTRY_QUANTILE,
+        "exit_quantile": EXIT_QUANTILE,
+        "direction": DIRECTION,
+        "stoploss": STOPLOSS,
+        "fee_assumption": FEE_ASSUMPTION,
+        "quantile_method": QUANTILE_METHOD,
     }
 
 
@@ -428,6 +443,22 @@ def save_model(last_fold_path, feature_names, val_ic, last_fold_val_ic, best_ite
         "feature_flags": FEATURE_FLAGS,
         "training_method": "rolling_cv (src/modeling.train_and_predict)",
     }
+    info.update(
+        build_strategy_contract(
+            interval=INTERVAL,
+            inference_symbol=INFERENCE_SYMBOL,
+            feature_flags=FEATURE_FLAGS,
+            best_iteration=best_iter,
+            train_months=TRAIN_MONTHS,
+            bins=BINS,
+            entry_quantile=ENTRY_QUANTILE,
+            exit_quantile=EXIT_QUANTILE,
+            direction=DIRECTION,
+            stoploss=STOPLOSS,
+            fee_assumption=FEE_ASSUMPTION,
+            quantile_method=QUANTILE_METHOD,
+        )
+    )
     tmp_info = MODEL_INFO_PATH + ".tmp"
     try:
         with open(tmp_info, "w") as fh:

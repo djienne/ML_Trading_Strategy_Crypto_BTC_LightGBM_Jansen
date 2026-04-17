@@ -40,6 +40,6 @@ class SignalEngineTests(unittest.TestCase):
 
         self.assertTrue(valid.all())
         self.assertEqual(desired_position.tolist(), [0, 1, 0, 0, 0, 1, 0])
-        self.assertEqual(executed_position.tolist(), [0, 0, 1, 0, 0, 0, 1])
+        self.assertEqual(executed_position.tolist(), [0, 0, 0, 1, 0, 0, 0])
         self.assertEqual(entry_signal.astype(int).tolist(), [0, 0, 1, 0, 0, 0, 1])
         self.assertEqual(exit_signal.astype(int).tolist(), [0, 0, 0, 1, 0, 0, 0])

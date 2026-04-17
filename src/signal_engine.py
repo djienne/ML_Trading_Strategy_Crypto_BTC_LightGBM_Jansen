@@ -175,4 +175,6 @@ def shift_position_for_execution(desired_position, live_from=None):
     if live_from is not None:
         desired = desired.copy()
         desired.loc[desired.index < live_from] = 0
-    return desired.shift(1, fill_value=0).astype("int64")
+    # 2-bar delay matches the live pipeline: compute_live_transition_signals
+    # shifts once, Freqtrade then fills at the next bar's open.
+    return desired.shift(2, fill_value=0).astype("int64")

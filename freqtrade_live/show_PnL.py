@@ -5,6 +5,7 @@ Show performance for LightGBM strategy Freqtrade containers.
 - Reads API credentials from freqtrade_live/user_data/config.json
 - Binary good/bad colors + CAGR from profit_all% since first trade
 - DAYS column = days since first trade
+- LAST TRADE column = time since most recent open/close trade event
 """
 
 import json
@@ -97,6 +98,20 @@ def colorize_trades(trades: Any) -> str:
     except (ValueError, TypeError):
         return f"{Colors.DIM}{trades}{Colors.RESET}"
 
+def colorize_last_trade(value: Optional[str], timestamp_ms: Optional[int]) -> str:
+    if not value or timestamp_ms is None:
+        return f"{Colors.DIM}-{Colors.RESET}"
+    try:
+        trade_date = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+        elapsed_hours = (datetime.now(timezone.utc) - trade_date).total_seconds() / 3600.0
+    except Exception:
+        return f"{Colors.DIM}{value}{Colors.RESET}"
+    if elapsed_hours <= 24:
+        return f"{Colors.BRIGHT_GREEN}{value}{Colors.RESET}"
+    if elapsed_hours <= 24 * 7:
+        return f"{Colors.YELLOW}{value}{Colors.RESET}"
+    return f"{Colors.BRIGHT_RED}{value}{Colors.RESET}"
+
 def colorize_container_name(name: str) -> str:
     return f"{Colors.BOLD}{Colors.BRIGHT_BLUE}{name}{Colors.RESET}"
 
@@ -185,6 +200,39 @@ def extract_earliest_open_ts_from_trades(trades_list: Iterable[Dict[str, Any]]) 
                 break
     return min(candidates) if candidates else None
 
+def extract_latest_ts_from_trades(trades_list: Iterable[Dict[str, Any]]) -> Optional[int]:
+    candidates: List[int] = []
+    trade_keys = (
+        "close_timestamp",
+        "close_date",
+        "open_fill_timestamp",
+        "open_fill_date",
+        "open_timestamp",
+        "open_date",
+        "date",
+    )
+    order_keys = (
+        "order_filled_timestamp",
+        "order_filled_date",
+        "order_timestamp",
+        "order_date",
+    )
+    for trade in trades_list or []:
+        for key in trade_keys:
+            ts = try_parse_dt(trade.get(key))
+            if ts:
+                candidates.append(ts)
+        orders = trade.get("orders")
+        if isinstance(orders, list):
+            for order in orders:
+                if not isinstance(order, dict):
+                    continue
+                for key in order_keys:
+                    ts = try_parse_dt(order.get(key))
+                    if ts:
+                        candidates.append(ts)
+    return max(candidates) if candidates else None
+
 # ---- IO helpers ----
 
 def docker_containers() -> List[Dict[str, Optional[int]]]:
@@ -260,6 +308,32 @@ def get_first_trade_timestamp(base: str, auth: HTTPBasicAuth, prof: Optional[Dic
 
     return None
 
+def get_last_trade_timestamp(base: str, auth: HTTPBasicAuth, prof: Optional[Dict[str, Any]]) -> Optional[int]:
+    """
+    Find the newest known trade timestamp in milliseconds.
+    Prefer full trade/order details, then fall back to /profit's latest trade hint.
+    """
+    for url in (
+        f"{base}/trades?limit=5000",
+        f"{base}/trades",
+    ):
+        data = get_json(url, auth)
+        if data:
+            trades_list = (data.get("trades") or data.get("data") or data) if isinstance(data, (dict, list)) else []
+            if not isinstance(trades_list, list):
+                trades_list = []
+            ts = extract_latest_ts_from_trades(trades_list)
+            if ts:
+                return ts
+
+    if isinstance(prof, dict):
+        return extract_first_ts_from_any(
+            prof,
+            ("latest_trade_timestamp", "latest_trade_date", "latest_trade"),
+        )
+
+    return None
+
 def calculate_cagr(profit_all_percent: Optional[float], first_trade_timestamp_ms: Optional[int]) -> Optional[float]:
     """
     CAGR from current PnL of ALL trades (profit_all_percent) and time since first trade.
@@ -297,6 +371,29 @@ def days_since_first_trade(first_trade_timestamp_ms: Optional[int]) -> Optional[
     except Exception:
         return None
 
+def format_since_timestamp(timestamp_ms: Optional[int]) -> Optional[str]:
+    if timestamp_ms is None:
+        return None
+    try:
+        trade_date = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
+        elapsed_seconds = int((datetime.now(timezone.utc) - trade_date).total_seconds())
+    except Exception:
+        return None
+    if elapsed_seconds < 0:
+        return None
+    if elapsed_seconds < 60:
+        return "now"
+    minutes = elapsed_seconds // 60
+    if minutes < 60:
+        return f"{minutes}m ago"
+    hours = minutes // 60
+    mins = minutes % 60
+    if hours < 24:
+        return f"{hours}h {mins}m ago" if mins else f"{hours}h ago"
+    days = hours // 24
+    hrs = hours % 24
+    return f"{days}d {hrs}h ago" if hrs else f"{days}d ago"
+
 def pct(x: Optional[float]) -> str:
     return "-" if x is None else f"{x:.2f}%"
 
@@ -327,6 +424,8 @@ def main() -> None:
                     "bot": bot_name,
                     "strategy": strategy,
                     "trades": "-",
+                    "last_trade": None,
+                    "last_trade_ts": None,
                     "win_rate": None,
                     "profit_all": None,
                     "profit_closed": None,
@@ -352,6 +451,8 @@ def main() -> None:
                     "bot": bot_name,
                     "strategy": strategy,
                     "trades": "-",
+                    "last_trade": None,
+                    "last_trade_ts": None,
                     "win_rate": None,
                     "profit_all": None,
                     "profit_closed": None,
@@ -364,6 +465,8 @@ def main() -> None:
             continue
 
         first_trade_ts = get_first_trade_timestamp(base, auth, prof)
+        last_trade_ts = get_last_trade_timestamp(base, auth, prof)
+        last_trade = format_since_timestamp(last_trade_ts)
 
         w = (prof.get("winning_trades") or 0) if isinstance(prof, dict) else 0
         l = (prof.get("losing_trades") or 0) if isinstance(prof, dict) else 0
@@ -388,6 +491,8 @@ def main() -> None:
                 "bot": bot_name,
                 "strategy": strategy,
                 "trades": tc,
+                "last_trade": last_trade,
+                "last_trade_ts": last_trade_ts,
                 "win_rate": win_rate,
                 "profit_all": profit_all,
                 "profit_closed": prof.get("profit_closed_percent") if isinstance(prof, dict) else None,
@@ -404,6 +509,7 @@ def main() -> None:
         ("BOT", "bot"),
         ("STRATEGY", "strategy"),
         ("TRADES", "trades"),
+        ("LAST TRADE", "last_trade"),
         ("WIN RATE", "win_rate"),
         ("PROFIT ALL", "profit_all"),
         ("PROFIT CLOSED", "profit_closed"),
@@ -425,6 +531,8 @@ def main() -> None:
             return colorize_strategy(str(v))
         if key == "trades":
             return colorize_trades(v)
+        if key == "last_trade":
+            return colorize_last_trade(v, r.get("last_trade_ts"))
         if key == "win_rate":
             return colorize_win_rate(v)
         if key in ("profit_all", "profit_closed"):

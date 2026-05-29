@@ -46,7 +46,11 @@ Expect divergence from live results because of:
 - order-book pricing and unfilled timeouts in Freqtrade
 - exchange slippage and latency
 - funding on futures positions
-- different stoploss mechanics between vectorized backtest and live trading
+- different stoploss mechanics between vectorized backtest and live trading: the
+  vectorized stoploss triggers on the bar-by-bar open→close cumulative return,
+  not the intrabar low Freqtrade uses. The backtest does mirror live's
+  "re-entry requires a fresh entry signal after a stoploss close" behaviour, but
+  the exact trigger price/bar can still differ.
 
 ## Recommended Validation Flow
 

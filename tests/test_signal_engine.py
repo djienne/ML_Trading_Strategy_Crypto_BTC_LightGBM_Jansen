@@ -40,6 +40,9 @@ class SignalEngineTests(unittest.TestCase):
 
         self.assertTrue(valid.all())
         self.assertEqual(desired_position.tolist(), [0, 1, 0, 0, 0, 1, 0])
-        self.assertEqual(executed_position.tolist(), [0, 0, 0, 1, 0, 0, 0])
-        self.assertEqual(entry_signal.astype(int).tolist(), [0, 0, 1, 0, 0, 0, 1])
-        self.assertEqual(exit_signal.astype(int).tolist(), [0, 0, 0, 1, 0, 0, 0])
+        # 1-bar execution: position held one candle after the desired transition
+        # (Freqtrade fills at the next bar's open), capturing fwd1bar[T].
+        self.assertEqual(executed_position.tolist(), [0, 0, 1, 0, 0, 0, 1])
+        # Entry/exit signals sit on the transition candle itself (no extra shift).
+        self.assertEqual(entry_signal.astype(int).tolist(), [0, 1, 0, 0, 0, 1, 0])
+        self.assertEqual(exit_signal.astype(int).tolist(), [0, 0, 1, 0, 0, 0, 1])

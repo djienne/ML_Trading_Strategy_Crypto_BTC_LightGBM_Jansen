@@ -3,7 +3,6 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
 
 import lightgbm as lgb
 import numpy as np
@@ -51,6 +50,11 @@ class LightGBMStrategy(IStrategy):
     minimal_roi = {"0": 100}  # exits via signals only
 
     # Paths inside the container (mapped from shared/ volume)
+    MODELS_DIR = "/freqtrade/shared/models"
+    ARCHIVE_DIR = "/freqtrade/shared/models/archive"
+    # Atomic pointer naming the archive snapshot to load. Preferred over the flat
+    # files below, which remain as a fallback for pre-pointer deployments.
+    CURRENT_POINTER_PATH = "/freqtrade/shared/models/current"
     MODEL_PATH = "/freqtrade/shared/models/latest_model.txt"
     MODEL_INFO_PATH = "/freqtrade/shared/models/model_info.json"
     PRED_HISTORY_PATH = "/freqtrade/shared/models/latest_predictions.feather"
@@ -58,7 +62,7 @@ class LightGBMStrategy(IStrategy):
 
     # ---- internal state ----
     _model = None
-    _model_mtime = 0.0
+    _model_version = None  # pointer stamp or flat-mtime key; reload when it changes
     _feature_names = None
     _best_iteration = None  # from model_info.json; matches backtest
     _feature_flags = None   # from model_info.json; ensures feature parity
@@ -89,35 +93,80 @@ class LightGBMStrategy(IStrategy):
     # Model + history loading
     # ------------------------------------------------------------------
 
+    def _resolve_artifacts(self):
+        """Return (model_path, info_path, pred_path, version) for the snapshot to
+        load, or None if no model is available.
+
+        Prefers the atomic ``current`` pointer -> ``archive/<stamp>/`` snapshot
+        (a fully-consistent {model, info, preds} set); falls back to the legacy
+        flat files keyed by model mtime so a pre-pointer deployment keeps working.
+        """
+        try:
+            if os.path.exists(self.CURRENT_POINTER_PATH):
+                with open(self.CURRENT_POINTER_PATH, encoding="utf-8") as fh:
+                    stamp = fh.read().strip()
+                if stamp:
+                    snap = os.path.join(self.ARCHIVE_DIR, stamp)
+                    model_p = os.path.join(snap, "latest_model.txt")
+                    info_p = os.path.join(snap, "model_info.json")
+                    pred_p = os.path.join(snap, "latest_predictions.feather")
+                    if (
+                        os.path.exists(model_p)
+                        and os.path.exists(info_p)
+                        and os.path.exists(pred_p)
+                    ):
+                        return model_p, info_p, pred_p, "ptr:" + stamp
+                    logger.warning(
+                        "current pointer names %s but its snapshot is incomplete; "
+                        "falling back to flat files.",
+                        stamp,
+                    )
+        except OSError:
+            logger.exception("Could not read current pointer; using flat files.")
+
+        if os.path.exists(self.MODEL_PATH):
+            try:
+                mtime = os.path.getmtime(self.MODEL_PATH)
+            except OSError:
+                return None
+            return (
+                self.MODEL_PATH,
+                self.MODEL_INFO_PATH,
+                self.PRED_HISTORY_PATH,
+                "mtime:%s" % mtime,
+            )
+        return None
+
     def _maybe_reload_model(self):
-        if not os.path.exists(self.MODEL_PATH):
+        resolved = self._resolve_artifacts()
+        if resolved is None:
             if self._model is None and not self._no_model_warned:
                 logger.warning(
-                    "LightGBMStrategy: no model at %s; signals disabled.",
-                    self.MODEL_PATH,
+                    "LightGBMStrategy: no model artifacts under %s; signals disabled.",
+                    self.MODELS_DIR,
                 )
                 self._no_model_warned = True
             return
 
+        model_path, info_path, pred_path, version = resolved
+        if version == self._model_version:
+            return
+
         try:
-            file_size = os.path.getsize(self.MODEL_PATH)
+            file_size = os.path.getsize(model_path)
         except OSError:
             return
         if file_size == 0:
             return
 
-        mtime = os.path.getmtime(self.MODEL_PATH)
-        if mtime == self._model_mtime:
-            return
-
         try:
-            model = lgb.Booster(model_file=self.MODEL_PATH)
+            model = lgb.Booster(model_file=model_path)
             names = model.feature_name()
             if not names:
                 logger.error("Model has no feature names; skipping.")
                 return
 
-            model_info = self._load_model_info()
+            model_info = self._load_model_info(info_path)
             if not model_info:
                 logger.error("Missing model_info.json; rejecting model reload.")
                 return
@@ -160,48 +209,48 @@ class LightGBMStrategy(IStrategy):
             self.stoploss = contract["stoploss"]
             self._no_model_warned = False
             logger.info(
-                "Loaded model (mtime %s, %d features, best_iter=%s)",
-                datetime.fromtimestamp(mtime).isoformat(),
+                "Loaded model (version %s, %d features, best_iter=%s)",
+                version,
                 len(names),
                 self._best_iteration,
             )
-            self._load_prediction_history()
-            # Only latch mtime after everything succeeds (model + history).
+            self._load_prediction_history(pred_path)
+            # Only latch the version after everything succeeds (model + history).
             if self._model is not None:
-                self._model_mtime = mtime
+                self._model_version = version
             else:
                 logger.warning("Model disabled by history check; will retry on next loop.")
         except Exception:
             logger.exception("Failed to load model; keeping previous")
 
-    def _load_model_info(self):
+    def _load_model_info(self, path):
         """Load full model_info.json dict for contract validation."""
-        if not os.path.exists(self.MODEL_INFO_PATH):
+        if not os.path.exists(path):
             return None
         try:
-            with open(self.MODEL_INFO_PATH, encoding="utf-8") as fh:
+            with open(path, encoding="utf-8") as fh:
                 return json.load(fh)
         except Exception:
             logger.exception("Could not read model_info.json")
         return None
 
-    def _load_prediction_history(self):
+    def _load_prediction_history(self, path):
         """Load historical predictions from rolling CV folds.
 
         These are the same predictions the offline backtest uses to anchor
         rolling quantiles before fresh live bars are appended.
         """
-        if not os.path.exists(self.PRED_HISTORY_PATH):
+        if not os.path.exists(path):
             logger.error(
                 "No prediction history at %s; signals disabled until model reload.",
-                self.PRED_HISTORY_PATH,
+                path,
             )
             self._pred_history = None
             self._model = None
             return
 
         try:
-            hist = load_frame(self.PRED_HISTORY_PATH)
+            hist = load_frame(path)
             if "prediction" not in hist.columns:
                 logger.error("Prediction history has no 'prediction' column; signals disabled.")
                 self._pred_history = None

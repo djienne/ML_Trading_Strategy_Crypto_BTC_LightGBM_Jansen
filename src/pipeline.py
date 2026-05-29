@@ -110,10 +110,15 @@ def run_train(config, symbol, interval, paths, retrain=False, boost_rounds=250, 
     print(f"Model output: {model_dir}")
     print(f"Predictions output: {predictions_path}")
 
-    # Auto-detect hyperparam changes — force retrain if params differ from last run
+    # Auto-detect training-config changes — force retrain if params differ from
+    # last run. Includes feature_flags + bar_type so toggling a feature (which
+    # changes the model's feature set) forces a rebuild instead of silently
+    # reusing a model trained on a different feature set.
     current_params = dict(train_months=train_months, num_leaves=num_leaves,
                           min_data_in_leaf=min_data_in_leaf, feature_fraction=feature_fraction,
-                          learning_rate=learning_rate, boost_rounds=boost_rounds)
+                          learning_rate=learning_rate, boost_rounds=boost_rounds,
+                          feature_flags=resolve_feature_flags(config),
+                          bar_type=resolve_bar_type(config))
     params_path = os.path.join(model_dir, "train_params.json")
     if not retrain and os.path.exists(params_path):
         try:

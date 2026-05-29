@@ -26,6 +26,17 @@ def _apply_stoploss(signal, returns, stoploss):
     - capped_returns[i] = capped loss on breach bar
     - sl_exit_flags[i] = 1 on breach bars (so the capped return is still applied
       even though signal=0)
+
+    After a stoploss exit the position stays flat until the underlying signal
+    returns to 0 and then forms a fresh entry. This matches live Freqtrade,
+    which closes the trade on a stoploss and will not re-enter until a new
+    enter_long signal fires (a 0->1 desired transition); without this lock the
+    vectorized backtest would re-enter on the very next bar while the signal is
+    still high and could immediately re-trigger the stoploss.
+
+    Note: the trigger here is the bar-by-bar open->close (cumulative `returns`)
+    breach, not the intrabar low Freqtrade actually uses, so stoploss timing is
+    an approximation, not a fill-faithful simulation.
     """
     n = len(signal)
     out = signal.copy()
@@ -33,8 +44,13 @@ def _apply_stoploss(signal, returns, stoploss):
     sl_exit = np.zeros(n, dtype=np.int64)
     cum_ret = 0.0
     in_trade = False
+    locked = False  # set after a stoploss exit; cleared when signal goes flat
     for i in range(n):
         if out[i] == 1:
+            if locked:
+                # Stoploss already closed this run; require a fresh entry.
+                out[i] = 0
+                continue
             if not in_trade:
                 in_trade = True
                 cum_ret = returns[i]
@@ -51,9 +67,11 @@ def _apply_stoploss(signal, returns, stoploss):
                 sl_exit[i] = 1   # mark: capped return still applies
                 in_trade = False
                 cum_ret = 0.0
+                locked = True
         else:
             in_trade = False
             cum_ret = 0.0
+            locked = False
     return out, capped, sl_exit
 
 

@@ -55,6 +55,7 @@ from src.utils import get_time_index, interval_to_minutes
 
 MODEL_DIR = SCRIPT_DIR / "shared" / "models"
 ARCHIVE_DIR = MODEL_DIR / "archive"
+CURRENT_POINTER_PATH = MODEL_DIR / "current"
 CURRENT_MODEL_PATH = MODEL_DIR / "latest_model.txt"
 CURRENT_INFO_PATH = MODEL_DIR / "model_info.json"
 CURRENT_PRED_PATH = MODEL_DIR / "latest_predictions.feather"
@@ -191,7 +192,23 @@ def load_snapshot(info_path: Path, model_path: Path, predictions_path: Path, nam
 def discover_snapshots() -> list[ArtifactSnapshot]:
     snapshots: dict[str, ArtifactSnapshot] = {}
 
-    if CURRENT_INFO_PATH.exists() and CURRENT_MODEL_PATH.exists() and CURRENT_PRED_PATH.exists():
+    # Resolve "current" via the atomic pointer (what the live trader loads),
+    # falling back to the flat latest_* files for pre-pointer deployments.
+    current = None
+    pointer_stamp = None
+    if CURRENT_POINTER_PATH.exists():
+        try:
+            pointer_stamp = CURRENT_POINTER_PATH.read_text(encoding="utf-8").strip()
+        except OSError:
+            pointer_stamp = None
+    if pointer_stamp:
+        snap = ARCHIVE_DIR / pointer_stamp
+        info_p = snap / "model_info.json"
+        model_p = snap / "latest_model.txt"
+        pred_p = snap / "latest_predictions.feather"
+        if info_p.exists() and model_p.exists() and pred_p.exists():
+            current = load_snapshot(info_p, model_p, pred_p, name="current", is_current=True)
+    if current is None and CURRENT_INFO_PATH.exists() and CURRENT_MODEL_PATH.exists() and CURRENT_PRED_PATH.exists():
         current = load_snapshot(
             CURRENT_INFO_PATH,
             CURRENT_MODEL_PATH,
@@ -199,6 +216,7 @@ def discover_snapshots() -> list[ArtifactSnapshot]:
             name="current",
             is_current=True,
         )
+    if current is not None:
         snapshots[current.training_date.isoformat()] = current
 
     if ARCHIVE_DIR.exists():

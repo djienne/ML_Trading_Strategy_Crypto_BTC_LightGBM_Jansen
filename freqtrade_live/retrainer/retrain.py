@@ -64,6 +64,10 @@ MODEL_PATH = os.path.join(MODEL_DIR, "latest_model.txt")
 MODEL_INFO_PATH = os.path.join(MODEL_DIR, "model_info.json")
 PREDICTIONS_PATH = os.path.join(MODEL_DIR, "latest_predictions.feather")
 ARCHIVE_DIR = os.path.join(MODEL_DIR, "archive")
+# Atomic pointer naming the archive snapshot the trader should load. Flipping
+# this file (single os.replace) is the publish commit; the snapshot dir it names
+# is immutable, so the trader always sees a consistent {model,info,preds} set.
+CURRENT_POINTER_PATH = os.path.join(MODEL_DIR, "current")
 DOWNLOAD_CONFIG_PATH = "/app/_download_config.json"
 TRAINING_SOURCE_PATHS = (
     "/app/src/features.py",
@@ -170,6 +174,20 @@ def _archive_snapshot(training_date: str, source: str, model_info: dict | None =
         logger.exception("Failed to archive live artifacts to %s", snapshot_dir)
         shutil.rmtree(tmp_dir, ignore_errors=True)
         return False
+
+
+def _write_current_pointer(stamp: str) -> None:
+    """Atomically flip the `current` pointer to an archive snapshot name."""
+    tmp = CURRENT_POINTER_PATH + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(stamp)
+        os.replace(tmp, CURRENT_POINTER_PATH)
+        logger.info("Flipped current pointer -> %s", stamp)
+    except Exception:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise
 
 
 def _archive_current_if_needed():
@@ -340,7 +358,9 @@ def train_model(model_data, last_fold_only=False):
       - seed=42 for reproducibility
 
     The last fold's model is deployed as the live model.
-    When last_fold_only=True, only the last fold is trained (fast startup).
+    When last_fold_only=True, only the last fold is trained; the retrainer
+    currently always trains all folds (both startup and monthly run the full
+    pipeline), so this stays False in production.
     """
     # Clear old folds to prevent stale models from being promoted
     if os.path.isdir(FOLD_DIR):
@@ -415,8 +435,7 @@ def train_model(model_data, last_fold_only=False):
     return last_fold_path, feature_names, val_ic, last_fold_val_ic, best_iter, last_fold_num, predictions
 
 
-def save_model(last_fold_path, feature_names, val_ic, last_fold_val_ic, best_iter, num_folds, predictions,
-               skip_predictions=False):
+def save_model(last_fold_path, feature_names, val_ic, last_fold_val_ic, best_iter, num_folds, predictions):
     """Copy last fold model as latest_model.txt and save metadata.
 
     Order matters: predictions and metadata are saved BEFORE the model file,
@@ -426,8 +445,7 @@ def save_model(last_fold_path, feature_names, val_ic, last_fold_val_ic, best_ite
     os.makedirs(MODEL_DIR, exist_ok=True)
 
     # 1. Save predictions FIRST (before model triggers strategy reload)
-    #    Skip on startup retrain — keep existing prediction history.
-    if not skip_predictions and predictions is not None and not predictions.empty:
+    if predictions is not None and not predictions.empty:
         try:
             save_frame(predictions, PREDICTIONS_PATH)
             logger.info("Saved predictions -> %s", PREDICTIONS_PATH)
@@ -504,7 +522,20 @@ def save_model(last_fold_path, feature_names, val_ic, last_fold_val_ic, best_ite
         raise RuntimeError("Post-save check: saved model file is unreadable!")
 
     _archive_snapshot(info["training_date"], source="publish", model_info=info)
-    logger.info("Saved predictions -> model -> info: %s", MODEL_PATH)
+
+    # Commit: flip the `current` pointer to the immutable snapshot. The trader
+    # reloads when this stamp changes; the flat files written above remain as a
+    # fallback for readers that predate the pointer.
+    stamp = _archive_stamp(info["training_date"])
+    if os.path.isdir(os.path.join(ARCHIVE_DIR, stamp)):
+        _write_current_pointer(stamp)
+    else:
+        logger.warning(
+            "Archive snapshot %s missing; current pointer left unchanged "
+            "(trader falls back to flat latest_model.txt).",
+            stamp,
+        )
+    logger.info("Saved predictions -> model -> info -> current: %s", stamp)
 
 
 # ---------------------------------------------------------------------------
@@ -527,28 +558,6 @@ def run_pipeline():
         return True
     except Exception:
         logger.exception("Training pipeline failed.")
-        return False
-
-
-def run_startup_retrain():
-    """Fast startup retrain: last fold only, keep existing prediction history."""
-    try:
-        download_latest_data()
-        data = load_and_prepare()
-
-        if not validate_training_data(data):
-            logger.error("Data validation failed. Keeping existing model.")
-            return False
-
-        last_fold, feats, ic, last_ic, best, n_folds, preds = train_model(
-            data, last_fold_only=True,
-        )
-        save_model(last_fold, feats, ic, last_ic, best, n_folds, preds,
-                   skip_predictions=True)
-        gc.collect()
-        return True
-    except Exception:
-        logger.exception("Startup retrain failed.")
         return False
 
 

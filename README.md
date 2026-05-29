@@ -280,10 +280,11 @@ a `.tmp` sidecar, and the previous snapshot is moved into `archive/`.
 `freqtrade_live/user_data/strategies/LightGBMStrategy.py` hot-reloads the booster
 on file-mtime change, reads the contract from `model_info.json` for timeframe /
 symbol / bins / entry / exit / direction / stoploss, and seeds rolling quantiles
-from `latest_predictions.feather`. Freqtrade's own T → T+1 order execution is
-accounted for by an explicit 1-candle shift in `compute_live_transition_signals`
-so that the signal published on the just-closed bar lands on the row Freqtrade
-actually reads.
+from `latest_predictions.feather`. Entry/exit signals are published on the
+just-closed candle where `desired_position` transitions; Freqtrade reads that row
+and fills at the next bar's open — a single bar of execution delay that lands the
+position on exactly the candle the model predicts (`fwd1bar` = the next candle's
+return). No extra shift is applied in `compute_live_transition_signals`.
 
 ### Replay tool
 
@@ -340,6 +341,6 @@ file; changes to the contract propagate to every consumer without manual wiring.
 - Candle intervals shorter than 1 month are supported; the README examples assume `1m`.
 - Quantile assignment defaults to `--quantile-scope auto`, which uses `expanding` for single-symbol data and `timestamp` for multi-symbol data. Override with `--quantile-scope {timestamp,date,global,expanding}` if needed.
 - The backtest is a vectorized approximation meant for quick signal sanity checks, not a full execution-quality simulation.
-- Both the offline backtest and `backtest_live_window.py` apply a 2-bar delay between signal and held candle to match Freqtrade's fill-at-next-bar behavior, so a position is held one candle later than a naive "use the close of the signal bar" reading would suggest.
+- The offline backtest, `backtest_live_window.py`, and the live bot all apply a single bar of execution delay between the `desired_position` transition and the held candle, matching Freqtrade's fill-at-next-bar behavior: a transition on candle T results in holding candle T+1, which is the candle the model's target (`fwd1bar`) actually predicts. The offline backtest bakes this into the target (`fwd1bar` = next candle's return); the replay tool and live bot achieve it via Freqtrade's fill-at-next-bar.
 - `freqtrade_live/backtest_live_window.py` is the artifact-aware replay tool to use when checking live parity instead of only offline signal PnL.
 - The backtest alpha factor is a 1-day rolling z-score of the trading signal per symbol (min 60 minutes, both scaled to bars), scaled by 0.01 and averaged by timestamp for plotting.

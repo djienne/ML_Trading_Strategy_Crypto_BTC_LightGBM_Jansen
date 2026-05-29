@@ -160,14 +160,18 @@ def compute_desired_position(
 
 
 def compute_live_transition_signals(desired_position):
+    # desired_position[T] is derived from prediction[T], whose target is
+    # fwd1bar[T] = the open->close return of candle T+1. So a 0->1 transition at
+    # candle T means "hold candle T+1". The entry/exit signal is published on the
+    # transition candle T itself; Freqtrade reads it on the just-closed candle and
+    # fills at the open of candle T+1 -- a single bar of execution delay, which is
+    # exactly the bar the model predicts. No extra shift here (see
+    # shift_position_for_execution for the offline mirror of this convention).
     desired = pd.Series(desired_position).fillna(0).astype("int64")
     prev = desired.shift(1, fill_value=0)
     enter_base = (desired == 1) & (prev == 0)
     exit_base = (desired == 0) & (prev == 1)
-    return (
-        enter_base.shift(1, fill_value=False),
-        exit_base.shift(1, fill_value=False),
-    )
+    return enter_base, exit_base
 
 
 def shift_position_for_execution(desired_position, live_from=None):
@@ -175,6 +179,8 @@ def shift_position_for_execution(desired_position, live_from=None):
     if live_from is not None:
         desired = desired.copy()
         desired.loc[desired.index < live_from] = 0
-    # 2-bar delay matches the live pipeline: compute_live_transition_signals
-    # shifts once, Freqtrade then fills at the next bar's open.
-    return desired.shift(2, fill_value=0).astype("int64")
+    # 1-bar delay matches the live pipeline: compute_live_transition_signals
+    # publishes the signal on the transition candle, Freqtrade then fills at the
+    # next bar's open. So desired[T] -> position held on candle T+1, capturing
+    # the return the model predicted (fwd1bar[T]).
+    return desired.shift(1, fill_value=0).astype("int64")

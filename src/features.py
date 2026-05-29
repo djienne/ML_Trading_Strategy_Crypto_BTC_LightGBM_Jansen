@@ -200,9 +200,17 @@ def engineer_features(df, interval="1m", bar_type="time", feature_flags=None):
             .apply(lambda x: float(np.argmax(x) + 1), raw=True)
             .reset_index(level=0, drop=True)
         )
-        # Always use expanding time-series rank (not cross-sectional) so
-        # training and single-symbol live inference produce identical features.
-        ranked = expanding_pct_rank(argmax, min_periods=20)
+        # Expanding time-series rank (not cross-sectional), computed per symbol
+        # so one symbol's rank is never contaminated by another symbol's history.
+        # (Every other feature here is already grouped by symbol; this was the
+        # only one that ranked across the concatenated multi-symbol series.)
+        # Single-symbol / live inference is one group, so behavior is unchanged
+        # there.
+        ranked = (
+            argmax.groupby(symbol_key)
+            .apply(lambda x: expanding_pct_rank(x, min_periods=20))
+            .reset_index(level=0, drop=True)
+        )
         data["alpha001"] = ranked.sub(0.5)
 
     return data

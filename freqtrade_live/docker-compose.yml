@@ -44,6 +44,10 @@ services:
       - ./shared:/app/shared
       - ../src:/app/src:ro
       - ../download_data.py:/app/download_data.py:ro
+      # retrain.py is also baked into the image (see Dockerfile.retrainer) so the
+      # image runs standalone, but mounting it means code changes only need a
+      # `docker compose restart retrainer`, not a rebuild.
+      - ./retrainer/retrain.py:/app/retrain.py:ro
       - ../data/feather:/app/shared/data/feather
     mem_limit: 4g
     cpus: 2.0

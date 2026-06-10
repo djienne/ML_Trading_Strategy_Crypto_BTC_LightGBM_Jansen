@@ -6,7 +6,12 @@ Show performance for LightGBM strategy Freqtrade containers.
 - Binary good/bad colors + CAGR from profit_all% since first trade
 - DAYS column = days since first trade
 - LAST TRADE column = time since most recent open/close trade event
+- SHARPE column = annualized Sharpe of per-bar returns since the first trade,
+  with flat bars counted as 0 — the same convention as the vectorized backtest
+  (src/backtest.py), so it is comparable to grid-search Sharpe numbers
 """
+
+import math
 
 import json
 import re
@@ -83,6 +88,12 @@ def colorize_cagr(value: Optional[float]) -> str:
         return f"{Colors.DIM}-{Colors.RESET}"
     pct_str = f"{value:.2f}%"
     return f"{Colors.BRIGHT_GREEN}{pct_str}{Colors.RESET}" if value > 10 else f"{Colors.BRIGHT_RED}{pct_str}{Colors.RESET}"
+
+def colorize_sharpe(value: Optional[float]) -> str:
+    if value is None:
+        return f"{Colors.DIM}-{Colors.RESET}"
+    val_str = f"{value:.2f}"
+    return f"{Colors.BRIGHT_GREEN}{val_str}{Colors.RESET}" if value >= 1.0 else f"{Colors.BRIGHT_RED}{val_str}{Colors.RESET}"
 
 def colorize_drawdown(value: Optional[float]) -> str:
     if value is None:
@@ -358,6 +369,73 @@ def calculate_cagr(profit_all_percent: Optional[float], first_trade_timestamp_ms
     except Exception:
         return None
 
+def timeframe_minutes(timeframe: Optional[str]) -> int:
+    """Parse a freqtrade timeframe ('15m', '1h', '1d') to minutes; default 15."""
+    if not timeframe:
+        return 15
+    units = {"m": 1, "h": 60, "d": 1440, "w": 10080}
+    try:
+        return int(timeframe[:-1]) * units[timeframe[-1]]
+    except (KeyError, ValueError):
+        return 15
+
+def fetch_trades_list(base: str, auth: HTTPBasicAuth) -> List[Dict[str, Any]]:
+    for url in (f"{base}/trades?limit=5000", f"{base}/trades"):
+        data = get_json(url, auth)
+        if data:
+            trades_list = (data.get("trades") or data.get("data") or data) if isinstance(data, (dict, list)) else []
+            if isinstance(trades_list, list) and trades_list:
+                return trades_list
+    return []
+
+def calculate_annualized_sharpe(
+    trades_list: Iterable[Dict[str, Any]],
+    timeframe: Optional[str],
+) -> Optional[float]:
+    """
+    Annualized Sharpe of per-bar returns since the first trade, flat bars = 0.
+
+    Each closed trade's profit ratio is spread geometrically over its held
+    bars; every other bar between the first trade and now contributes 0. This
+    matches the vectorized backtest convention in src/backtest.py
+    (mean/std of per-bar net returns * sqrt(bars_per_year)).
+    """
+    tf_min = timeframe_minutes(timeframe)
+    bar_ms = tf_min * 60_000
+
+    bar_returns: Dict[int, float] = {}
+    first_bar: Optional[int] = None
+    for t in trades_list or []:
+        profit = t.get("close_profit")
+        open_ts = try_parse_dt(t.get("open_timestamp") or t.get("open_date"))
+        close_ts = try_parse_dt(t.get("close_timestamp") or t.get("close_date"))
+        if open_ts is None:
+            continue
+        open_bar = open_ts // bar_ms
+        first_bar = open_bar if first_bar is None else min(first_bar, open_bar)
+        if profit is None or close_ts is None:
+            continue  # open trade: counts for the window start only
+        held = max(1, close_ts // bar_ms - open_bar)
+        per_bar = (1.0 + float(profit)) ** (1.0 / held) - 1.0
+        for b in range(open_bar, open_bar + held):
+            bar_returns[b] = bar_returns.get(b, 0.0) + per_bar
+
+    if first_bar is None or not bar_returns:
+        return None
+    now_bar = int(datetime.now(timezone.utc).timestamp() * 1000) // bar_ms
+    n = now_bar - first_bar + 1
+    if n < 2:
+        return None
+
+    total = sum(bar_returns.values())
+    total_sq = sum(r * r for r in bar_returns.values())
+    mean = total / n
+    var = (total_sq - n * mean * mean) / (n - 1)
+    if var <= 0:
+        return None
+    bars_per_year = 365.25 * 24 * 60 / tf_min
+    return mean / math.sqrt(var) * math.sqrt(bars_per_year)
+
 def days_since_first_trade(first_trade_timestamp_ms: Optional[int]) -> Optional[int]:
     if first_trade_timestamp_ms is None:
         return None
@@ -430,6 +508,7 @@ def main() -> None:
                     "profit_all": None,
                     "profit_closed": None,
                     "pf": "-",
+                    "sharpe": None,
                     "max_dd": None,
                     "days": None,
                     "cagr": None,
@@ -457,6 +536,7 @@ def main() -> None:
                     "profit_all": None,
                     "profit_closed": None,
                     "pf": "-",
+                    "sharpe": None,
                     "max_dd": None,
                     "days": None,
                     "cagr": None,
@@ -483,6 +563,10 @@ def main() -> None:
         profit_all = (prof.get("profit_all_percent") if isinstance(prof, dict) else None)
         cagr = calculate_cagr(profit_all, first_trade_ts)
         days = days_since_first_trade(first_trade_ts)
+        sharpe = calculate_annualized_sharpe(
+            fetch_trades_list(base, auth),
+            cfg.get("timeframe"),
+        )
 
         rows.append(
             {
@@ -497,6 +581,7 @@ def main() -> None:
                 "profit_all": profit_all,
                 "profit_closed": prof.get("profit_closed_percent") if isinstance(prof, dict) else None,
                 "pf": pf_str,
+                "sharpe": sharpe,
                 "max_dd": mdd_pct,
                 "days": days,
                 "cagr": cagr,
@@ -514,6 +599,7 @@ def main() -> None:
         ("PROFIT ALL", "profit_all"),
         ("PROFIT CLOSED", "profit_closed"),
         ("PF", "pf"),
+        ("SHARPE", "sharpe"),
         ("MAX DD", "max_dd"),
         ("DAYS", "days"),
         ("CAGR", "cagr"),
@@ -541,6 +627,8 @@ def main() -> None:
             return colorize_drawdown(v)
         if key == "pf":
             return colorize_profit_factor(str(v))
+        if key == "sharpe":
+            return colorize_sharpe(v)
         if key == "days":
             return colorize_days(v)
         if key == "cagr":
@@ -589,7 +677,10 @@ def main() -> None:
         f"{Colors.BRIGHT_GREEN}Good{Colors.RESET} | {Colors.BRIGHT_RED}Bad{Colors.RESET} | {Colors.DIM}No Data{Colors.RESET}"
     )
     print(
-        f"{Colors.DIM}Rules: Profit >0 good | Win Rate >=50% good | PF >=1.0 good | CAGR >10% good{Colors.RESET}\n"
+        f"{Colors.DIM}Rules: Profit >0 good | Win Rate >=50% good | PF >=1.0 good | Sharpe >=1.0 good | CAGR >10% good{Colors.RESET}\n"
+    )
+    print(
+        f"{Colors.DIM}Sharpe: annualized, per-bar returns with flat bars = 0 (same convention as src/backtest.py).{Colors.RESET}\n"
     )
 
 if __name__ == "__main__":

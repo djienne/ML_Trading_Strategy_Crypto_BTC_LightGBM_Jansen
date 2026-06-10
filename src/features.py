@@ -1,7 +1,18 @@
 import numpy as np
 import pandas as pd
 
-from src.utils import expanding_pct_rank, get_symbol_key
+from src.utils import get_symbol_key, rolling_pct_rank
+
+# alpha001's time-series rank window (bars). The rank must be window-invariant:
+# the live bot only sees the freqtrade kline window (ohlcv_candle_limit +
+# startup_candle_count), so an expanding rank from the start of the dataframe
+# would give the same candle a different value in research (history since
+# 2020), live (~a few thousand bars) and replay (warmup bars). A fixed rolling
+# window makes the value identical everywhere once at least
+# ALPHA001_RANK_WINDOW + ~44 warmup bars are available, and it must stay small
+# enough that startup_candle_count (month coverage + this window + warmup)
+# remains under freqtrade's live limit of ohlcv_candle_limit * 5 candles.
+ALPHA001_RANK_WINDOW = 480
 
 
 def _resolve_group_key(index, interval, bar_type):
@@ -200,15 +211,20 @@ def engineer_features(df, interval="1m", bar_type="time", feature_flags=None):
             .apply(lambda x: float(np.argmax(x) + 1), raw=True)
             .reset_index(level=0, drop=True)
         )
-        # Expanding time-series rank (not cross-sectional), computed per symbol
+        # Rolling time-series rank (not cross-sectional), computed per symbol
         # so one symbol's rank is never contaminated by another symbol's history.
         # (Every other feature here is already grouped by symbol; this was the
         # only one that ranked across the concatenated multi-symbol series.)
         # Single-symbol / live inference is one group, so behavior is unchanged
-        # there.
+        # there. The window is fixed (see ALPHA001_RANK_WINDOW) so the value at
+        # a candle does not depend on where the dataframe happens to start.
         ranked = (
             argmax.groupby(symbol_key)
-            .apply(lambda x: expanding_pct_rank(x, min_periods=20))
+            .apply(
+                lambda x: rolling_pct_rank(
+                    x, window=ALPHA001_RANK_WINDOW, min_periods=20
+                )
+            )
             .reset_index(level=0, drop=True)
         )
         data["alpha001"] = ranked.sub(0.5)

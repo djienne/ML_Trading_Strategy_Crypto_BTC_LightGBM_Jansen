@@ -36,7 +36,19 @@ sys.path.insert(0, "/app")
 from src.features import engineer_features, prepare_target
 from src.data_io import load_data, load_data_multi, load_frame, save_frame, select_symbol
 from src.modeling import train_and_predict
-from src.strategy_contract import build_strategy_contract
+from src.strategy_contract import (
+    DEFAULT_BINS,
+    DEFAULT_DIRECTION,
+    DEFAULT_ENTRY_QUANTILE,
+    DEFAULT_EXIT_QUANTILE,
+    DEFAULT_FEE_ASSUMPTION,
+    DEFAULT_INFERENCE_SYMBOL,
+    DEFAULT_INTERVAL,
+    DEFAULT_QUANTILE_METHOD,
+    DEFAULT_STOPLOSS,
+    DEFAULT_TRAIN_MONTHS,
+    build_strategy_contract,
+)
 from src.utils import get_time_index, interval_to_minutes
 
 # ---------------------------------------------------------------------------
@@ -55,8 +67,8 @@ logger = logging.getLogger("retrainer")
 # Training uses multiple symbols for more data and less overfitting.
 # Live trading and backtesting only trade BTCUSDT.
 TRAIN_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
-INFERENCE_SYMBOL = "BTCUSDT"
-INTERVAL = "15m"
+INFERENCE_SYMBOL = DEFAULT_INFERENCE_SYMBOL  # "BTCUSDT"
+INTERVAL = DEFAULT_INTERVAL  # "15m"
 DATA_DIR = "/app/shared/data/feather"
 MODEL_DIR = "/app/shared/models"
 FOLD_DIR = os.path.join(MODEL_DIR, "folds")
@@ -77,19 +89,22 @@ TRAINING_SOURCE_PATHS = (
 
 # Model hyperparams — must match the deployed grid search winner.
 BOOST_ROUNDS = 5000
-TRAIN_MONTHS = 12
 NUM_LEAVES = 31
 MIN_DATA_IN_LEAF = 50
 FEATURE_FRACTION = 0.5
 LEARNING_RATE = 0.01
 MIN_TRAINING_ROWS = 10_000
-BINS = 100
-ENTRY_QUANTILE = 100
-EXIT_QUANTILE = 90
-DIRECTION = "high"
-STOPLOSS = -0.20
-FEE_ASSUMPTION = 0.0005
-QUANTILE_METHOD = "rolling"
+# Signal contract — single-sourced from src/strategy_contract.py so the
+# retrainer, the live strategy, the replay tool and the research CLI cannot
+# drift apart. Change the values there, not here.
+TRAIN_MONTHS = DEFAULT_TRAIN_MONTHS
+BINS = DEFAULT_BINS
+ENTRY_QUANTILE = DEFAULT_ENTRY_QUANTILE
+EXIT_QUANTILE = DEFAULT_EXIT_QUANTILE
+DIRECTION = DEFAULT_DIRECTION
+STOPLOSS = DEFAULT_STOPLOSS
+FEE_ASSUMPTION = DEFAULT_FEE_ASSUMPTION
+QUANTILE_METHOD = DEFAULT_QUANTILE_METHOD
 
 # All features enabled (must match config.json feature_flags).
 FEATURE_FLAGS = {

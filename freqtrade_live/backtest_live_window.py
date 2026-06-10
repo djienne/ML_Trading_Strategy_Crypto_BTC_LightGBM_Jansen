@@ -11,6 +11,12 @@ For a requested window, the script automatically picks the snapshot that was
 live at that time. If the window spans multiple monthly retrains, it stitches
 those snapshots together.
 
+Caveat: the replay runs *today's* signal/feature code against the archived
+models. Archived snapshots capture models and contracts, not code, so windows
+that predate a signal-code change (e.g. the 2-bar -> 1-bar execution fix of
+commit aef0d1a, deployed 2026-05-29) will legitimately disagree with what the
+bot did at the time.
+
 Usage examples
 --------------
 python freqtrade_live/backtest_live_window.py --start 2026-04-04
@@ -62,7 +68,11 @@ CURRENT_PRED_PATH = MODEL_DIR / "latest_predictions.feather"
 BINANCE_FUTURES_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
 
 DEFAULT_INITIAL_BALANCE = 1000.0
-FEATURE_WARMUP_BARS = 200
+# Must mirror the live bot's view: LightGBMStrategy.startup_candle_count uses
+# the same budget (31-day month coverage for the hysteresis state machine +
+# alpha001 rank window + feature warmup), so replayed features and machine
+# state match what the bot computes on its kline window.
+FEATURE_WARMUP_BARS = 3600
 
 
 @dataclass

@@ -18,7 +18,8 @@ services:
       - ../src:/freqtrade/src:ro
     ports:
       - "127.0.0.1:8080:8080"
-    mem_limit: 1g
+    mem_limit: 2g
+    memswap_limit: 2g
     cpus: 1.0
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/api/v1/ping || exit 1"]
@@ -50,6 +51,7 @@ services:
       - ./retrainer/retrain.py:/app/retrain.py:ro
       - ../data/feather:/app/shared/data/feather
     mem_limit: 4g
+    memswap_limit: 4g
     cpus: 2.0
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import os,sys,time; f='/app/shared/models/latest_model.txt.tmp'; sys.exit(1 if os.path.exists(f) and time.time()-os.path.getmtime(f)>1800 else 0)\""]

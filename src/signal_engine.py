@@ -159,6 +159,27 @@ def compute_desired_position(
     return desired, valid
 
 
+def compute_live_level_signals(desired_position):
+    """Level-based entry/exit flags for the live bot.
+
+    enter_long is set on every candle where desired_position == 1 and exit_long
+    on every candle where desired_position == 0. NaN bars (warmup rows without
+    a valid quantile) set neither flag, so a data hiccup can never force an
+    exit. Freqtrade only acts on enter_long when flat and on exit_long when
+    holding, so the flags carry no state of their own: a missed fill is simply
+    retried on the next candle instead of being lost the way an edge-triggered
+    signal would be, and whenever fills succeed the held bars still satisfy
+    position[T+1] = desired[T] -- the same contract as
+    shift_position_for_execution.
+    """
+    desired = pd.Series(desired_position)
+    valid = desired.notna()
+    des = desired.fillna(0).astype("int64")
+    enter = (des == 1) & valid
+    exit_ = (des == 0) & valid
+    return enter, exit_
+
+
 def compute_live_transition_signals(desired_position):
     # desired_position[T] is derived from prediction[T], whose target is
     # fwd1bar[T] = the open->close return of candle T+1. So a 0->1 transition at

@@ -18,7 +18,7 @@ from src.data_io import load_frame
 from src.features import engineer_features
 from src.signal_engine import (
     compute_desired_position,
-    compute_live_transition_signals,
+    compute_live_level_signals,
     compute_prediction_quantiles,
 )
 from src.strategy_contract import StrategyContractError, read_strategy_contract
@@ -42,7 +42,17 @@ class LightGBMStrategy(IStrategy):
     INTERFACE_VERSION = 3
 
     timeframe = "15m"
-    startup_candle_count = 50  # feature warmup margin (RSI/CCI need 14, alpha001 needs 20)
+    # The hysteresis state machine resets at every month end, so its state at
+    # any candle only depends on quantiles since the last month boundary. The
+    # kline window freqtrade provides in dry-run/live is
+    # ohlcv_candle_limit (1000 on Binance) + startup_candle_count, and the
+    # state machine restarts flat at the start of that window - so the window
+    # MUST always reach back past the last month boundary or live positions can
+    # silently desync from the backtest (missed exits, missed month-end
+    # force-flat). Budget: 2976 bars (31-day month) + 480 (alpha001 rank
+    # window) + ~44 (alpha001 warmup chain) + margin = 3600. This needs 4
+    # OHLCV startup calls, below freqtrade's hard cap of 5.
+    startup_candle_count = 3600
 
     can_short = False  # long-only
     # Default until a model contract is loaded. The published contract owns the live value.
@@ -59,6 +69,9 @@ class LightGBMStrategy(IStrategy):
     MODEL_INFO_PATH = "/freqtrade/shared/models/model_info.json"
     PRED_HISTORY_PATH = "/freqtrade/shared/models/latest_predictions.feather"
     IC_THRESH = None  # no IC filtering (grid search winner uses no_filt)
+    # Per-candle record of what the bot actually computed on each decision bar,
+    # so live behavior can be diffed exactly against the replay tool later.
+    SIGNAL_LOG_PATH = "/freqtrade/user_data/logs/signal_state.csv"
 
     # ---- internal state ----
     _model = None
@@ -69,6 +82,7 @@ class LightGBMStrategy(IStrategy):
     _contract = None
     _no_model_warned = False
     _pred_history = None  # DatetimeIndex Series of historical predictions
+    _last_logged_candle = None  # last decision bar written to SIGNAL_LOG_PATH
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -356,15 +370,46 @@ class LightGBMStrategy(IStrategy):
         dataframe["quantile"] = quantiles.reindex(df_indexed.index).values
         dataframe["desired_position"] = desired_position.reindex(df_indexed.index).values
 
+        if len(pred_series):
+            last_ts = pred_series.index[-1]
+            self._log_signal_state(
+                last_ts,
+                pred_series.iloc[-1],
+                quantiles.iloc[-1],
+                desired_position.iloc[-1],
+            )
+
         return dataframe
+
+    def _log_signal_state(self, ts, prediction, quantile, desired):
+        """Append the decision bar's computed state to SIGNAL_LOG_PATH."""
+        if ts == self._last_logged_candle:
+            return
+        try:
+            os.makedirs(os.path.dirname(self.SIGNAL_LOG_PATH), exist_ok=True)
+            new_file = not os.path.exists(self.SIGNAL_LOG_PATH)
+            with open(self.SIGNAL_LOG_PATH, "a", encoding="utf-8") as fh:
+                if new_file:
+                    fh.write("date,model_version,prediction,quantile,desired_position\n")
+                fh.write(
+                    "%s,%s,%.12g,%s,%s\n"
+                    % (ts, self._model_version, prediction, quantile, desired)
+                )
+            self._last_logged_candle = ts
+        except OSError:
+            logger.exception("Could not append signal state log.")
 
     # ------------------------------------------------------------------
     # Entry / exit signals (long-only)
     # ------------------------------------------------------------------
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        desired_position = dataframe.get("desired_position", pd.Series(0, index=dataframe.index))
-        entry_signal, _exit_signal = compute_live_transition_signals(desired_position)
+        # Level-based flags: enter while desired==1, exit while desired==0.
+        # Freqtrade's own trade state decides which flag matters, so a missed
+        # fill is retried on the next candle instead of being lost the way an
+        # edge-triggered (transition-only) signal would be.
+        desired_position = dataframe.get("desired_position", pd.Series(np.nan, index=dataframe.index))
+        entry_signal, _exit_signal = compute_live_level_signals(desired_position)
         dataframe["enter_long"] = 0
         dataframe.loc[entry_signal, "enter_long"] = 1
         # Suppress shorts: Freqtrade 2025.7 futures mode converts exit_long
@@ -373,8 +418,8 @@ class LightGBMStrategy(IStrategy):
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        desired_position = dataframe.get("desired_position", pd.Series(0, index=dataframe.index))
-        _entry_signal, exit_signal = compute_live_transition_signals(desired_position)
+        desired_position = dataframe.get("desired_position", pd.Series(np.nan, index=dataframe.index))
+        _entry_signal, exit_signal = compute_live_level_signals(desired_position)
         dataframe["exit_long"] = 0
         dataframe.loc[exit_signal, "exit_long"] = 1
         dataframe["exit_short"] = 0

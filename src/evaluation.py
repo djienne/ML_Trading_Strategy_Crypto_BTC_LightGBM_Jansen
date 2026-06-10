@@ -26,6 +26,12 @@ def add_quantile_labels(predictions, bins=10, scope="auto", interval=None, bar_t
 
     scope = resolve_quantile_scope(scope, symbol_count, interval=interval, bar_type=bar_type)
     if scope == "global":
+        print(
+            "WARNING: quantile scope 'global' ranks every prediction against the "
+            "FULL sample, including future bars - results contain lookahead bias "
+            "and must not be used for backtests or performance claims. Use "
+            "'expanding'/'timestamp' (or 'auto') instead."
+        )
         predictions["quantile"] = assign_decile(predictions["prediction"], bins=bins)
         return predictions.sort_values(["symbol", "timestamp"])
 

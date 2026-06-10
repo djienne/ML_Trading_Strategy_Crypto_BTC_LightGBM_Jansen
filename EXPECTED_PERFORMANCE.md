@@ -58,6 +58,32 @@ Expect divergence from live results because of:
 2. Use `python freqtrade_live/backtest_live_window.py` for artifact-aware replay over the live window you care about.
 3. Compare replay against Freqtrade dry-run/live logs for execution-quality drift.
 
+## Selection Bias In Grid-Search Numbers
+
+The grid search (`grid_search_full.py`) scores hundreds of hyperparameter/signal
+configurations on the same out-of-fold predictions that the headline metrics are
+reported from. The winner's reported Sharpe/net return is therefore an upper
+estimate (winner's curse): there is no untouched holdout behind it. Treat
+`GRID_SEARCH_RESULTS.md` numbers as relative rankings between configs, not as
+unbiased forecasts of live performance. The most honest forward-looking numbers
+are the dry-run ledger and the artifact replay.
+
+## Measured Live/Replay Parity (June 2026)
+
+Trade-by-trade diff of the dry-run ledger (`tradesv3.sqlite`) vs
+`backtest_live_window.py`:
+
+- After the 1-bar execution-parity fix (commit `aef0d1a`, live since
+  ~2026-05-29): 18 of 20 dry-run trades matched the replay bar-exactly on both
+  entry and exit; per-trade |PnL difference| averaged 0.12 percentage points
+  (order-book fills vs open-price assumption).
+- All 28 trades from before that fix show a systematic one-bar offset: the
+  replay runs *today's* code against archived models, and archived snapshots do
+  not capture code, so cross-version windows are not comparable.
+- The residual mismatch class (~2 trades in 9 days) is knife-edge entries:
+  entry requires the top 1% rolling quantile, so tiny prediction differences
+  (feature-window effects, quantile-window seeding) flip borderline bars.
+
 ## Reporting Guidance
 
 If you want fresh headline numbers, regenerate them from the current artifact and include:

@@ -1,5 +1,13 @@
 # Grid Search Results
 
+> **Historical record (April 2026).** These runs predate the 2026-06-10
+> alpha001 redefinition (expanding → rolling-480 rank, see `STRATEGY.md`), so
+> they are not directly comparable with current-code runs — regenerate before
+> comparing. The winner was also selected on the same out-of-fold predictions
+> these metrics are reported from, so treat the numbers as relative rankings,
+> not unbiased forecasts (see `EXPECTED_PERFORMANCE.md`, "Selection Bias In
+> Grid-Search Numbers").
+
 ## Setup
 - **Data:** BTC+ETH 15m, Dec 2019 - Mar 2026 (~436K rows)
 - **Training:** BTC+ETH, trading BTC only

@@ -56,7 +56,7 @@ Expect divergence from live results because of:
 
 1. Use `python main.py backtest` to sanity-check the strategy contract quickly.
 2. Use `python freqtrade_live/backtest_live_window.py` for artifact-aware replay over the live window you care about.
-3. Compare replay against Freqtrade dry-run/live logs for execution-quality drift.
+3. Compare replay against the Freqtrade trade ledger (`tradesv3.sqlite`) for execution-quality drift, and against the bot's per-candle `user_data/logs/signal_state.csv` to root-cause any signal-level disagreement (prediction vs quantile vs desired-position).
 
 ## Selection Bias In Grid-Search Numbers
 

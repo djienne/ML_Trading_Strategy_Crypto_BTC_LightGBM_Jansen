@@ -1,5 +1,11 @@
 # Optimization Results (April 2026)
 
+> **Historical record.** Numbers below were produced before the 2026-06-10
+> alpha001 redefinition (see `STRATEGY.md`) and carry grid-search selection
+> bias (see `EXPECTED_PERFORMANCE.md`). The chosen configuration itself is
+> still the deployed contract; regenerate the metrics before comparing against
+> current-code runs.
+
 ## Chosen Configuration
 
 | Parameter | Value | Reason |

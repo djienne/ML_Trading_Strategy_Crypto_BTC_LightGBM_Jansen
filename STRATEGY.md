@@ -45,7 +45,15 @@ The current feature set is driven by `feature_flags` and includes:
 - Indicators: `bop`, `cci`, `mfi`, `rsi`, `stochrsi`, `slowk`, `slowd`, `natr`
 - Alpha factors: `alpha054`, `alpha001`
 
-Feature generation is shared between offline training, live inference, and replay.
+Feature generation is shared between offline training, live inference, and replay,
+and every feature is window-invariant at the decision bar: its value does not
+depend on where the dataframe starts, given enough warmup (pinned by
+`tests/test_feature_window_parity.py`). This matters because the live bot only
+sees the freqtrade kline window, not the full history. In particular `alpha001`
+uses a fixed rolling time-series rank (`ALPHA001_RANK_WINDOW = 480` bars in
+`src/features.py`, per symbol); before 2026-06-10 it was an expanding rank from
+dataframe start, which made live values diverge from research and flipped ~4% of
+entries — models trained before that date are not comparable with current code.
 
 ## Training
 
@@ -80,6 +88,23 @@ The shared signal engine is used by:
 - live strategy state derivation
 - live-artifact replay
 
+### Live execution invariants
+
+Two properties keep the live bot equivalent to the offline state machine:
+
+- **Window coverage.** The hysteresis machine restarts flat at the start of
+  whatever dataframe it is given, and its only reset point is the month-end
+  force-flat. The live kline window (`ohlcv_candle_limit +
+  startup_candle_count` bars) must therefore always reach past the last month
+  boundary; `LightGBMStrategy.startup_candle_count = 3600` budgets a 31-day
+  month (2976 bars) + the alpha001 rank window (480) + feature warmup.
+- **Level-based signals.** The bot publishes `enter_long` while
+  `desired_position == 1` and `exit_long` while it is `0` (NaN bars publish
+  nothing). Freqtrade's trade state arbitrates, so a missed limit-order fill is
+  retried on the next candle instead of being lost, and held bars satisfy
+  `position[T+1] = desired[T]` — the same single bar of execution delay the
+  offline target (`fwd1bar`) encodes.
+
 ## Parity Boundaries
 
 Two different parity claims matter:
@@ -89,6 +114,12 @@ Two different parity claims matter:
 
 This repository is designed to make **signal parity** tight. It does **not** claim that the
 vectorized backtest is an execution-faithful simulation of live Binance futures trading.
+
+Signal parity is measured, not assumed: a trade-by-trade diff of the dry-run
+ledger against the artifact replay (June 2026) matched 18 of 20 trades
+bar-exactly with a mean per-trade |PnL difference| of 0.12 percentage points.
+See `REVIEW_FINDINGS.md` for the full review and `EXPECTED_PERFORMANCE.md` for
+the numbers and caveats.
 
 ## Execution Differences
 

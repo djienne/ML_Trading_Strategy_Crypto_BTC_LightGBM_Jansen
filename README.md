@@ -252,8 +252,19 @@ based on Freqtrade. It runs two Docker containers side by side (see
   atomically for the live strategy to pick up.
 
 Bring the stack up with the usual `docker compose up -d --build` from inside
-`freqtrade_live/`. Before starting, copy `user_data/config-private.json.template`
-to `user_data/config-private.json` and fill in API/telegram credentials as needed.
+`freqtrade_live/`. The default configuration is **dry-run** (`"dry_run": true`
+in `user_data/config.json`, simulated 1000 USDT wallet), which needs no
+exchange credentials.
+
+To trade real money you must additionally:
+
+1. Copy `user_data/config-private.json.template` to
+   `user_data/config-private.json` and fill in your Binance API key/secret.
+2. Add `--config /freqtrade/user_data/config-private.json` to the freqtrade
+   service `command` in `docker-compose.yml` (the private config is **not**
+   loaded by default).
+3. Set `"dry_run": false` and replace the placeholder `api_server`
+   password/JWT secret in `user_data/config.json`.
 
 ### Shared artifact directory
 
@@ -349,9 +360,12 @@ what the bot did at the time (measured parity numbers are in
 
 `freqtrade_live/show_PnL.py` discovers every running container whose name
 contains `lgbm`, queries its Freqtrade API (`/profit`, `/status`, `/trades`),
-and prints a per-container table of trade count, win rate, profit factor, max
-drawdown, days since first trade, and annualized CAGR. Credentials are read from
-`freqtrade_live/user_data/config.json`.
+and prints a per-container table of trade count, time since last trade, win
+rate, profit factor, annualized Sharpe, max drawdown, days since first trade,
+and annualized CAGR. The Sharpe uses the same convention as the vectorized
+backtest (per-bar returns with flat bars counted as 0, annualized by
+sqrt(bars/year)), so it is directly comparable to grid-search Sharpe numbers.
+Credentials are read from `freqtrade_live/user_data/config.json`.
 
 ### Strategy contract
 

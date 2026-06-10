@@ -7,10 +7,12 @@ from the rolling cross-validation is deployed as the live model.
 
 Lifecycle
 ---------
-1. On startup: clean up orphaned .tmp files, then full retrain only if
-   the published model/history are missing, stale, or the training code changed.
-2. Monthly (1st of each month): download latest BTC data, retrain,
-   and save the last fold's model to the shared volume.
+1. On startup: clean up orphaned .tmp files, then full retrain only if the
+   published model/history are missing or stale, the training config no longer
+   matches, or the training source code changed.
+2. Monthly (1st of each month): download the latest BTC+ETH data, retrain,
+   and publish the last fold's model to the shared volume (atomic snapshot +
+   `current` pointer flip).
 """
 
 import gc

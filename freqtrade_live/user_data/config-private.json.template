@@ -1,7 +1,7 @@
 {
     "exchange": {
-        "walletAddress": "0xYOUR_WALLET_ADDRESS",
-        "privateKey": "0xYOUR_PRIVATE_KEY",
+        "key": "YOUR_BINANCE_API_KEY",
+        "secret": "YOUR_BINANCE_API_SECRET",
         "ccxt_config": {
             "enableRateLimit": true,
             "rateLimit": 500

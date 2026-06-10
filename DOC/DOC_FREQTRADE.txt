@@ -1,3 +1,9 @@
+﻿================================================================================
+LOCAL REFERENCE SNAPSHOT - NOT AUTHORED OR MAINTAINED IN THIS REPO
+Pasted excerpts of the official Freqtrade documentation (https://www.freqtrade.io),
+kept for offline reference while developing this project (freqtrade 2025.7 era).
+Check the official docs for anything current.
+================================================================================
 Introduction
 Freqtrade is a free and open source crypto trading bot written in Python. It is designed to support all major exchanges and be controlled via Telegram or webUI. It contains backtesting, plotting and money management tools as well as strategy optimization by machine learning.
 
@@ -3723,12 +3729,12 @@ Freqtrade allows the creation of a user-data directory using freqtrade create-us
 
 
 user_data/
-├── backtest_results
-├── data
-├── hyperopts
-├── hyperopt_results
-├── plot
-└── strategies
+â”œâ”€â”€ backtest_results
+â”œâ”€â”€ data
+â”œâ”€â”€ hyperopts
+â”œâ”€â”€ hyperopt_results
+â”œâ”€â”€ plot
+â””â”€â”€ strategies
 You can add the entry "user_data_dir" setting to your configuration, to always point your bot to this directory. Alternatively, pass in --userdir to every command. The bot will fail to start if the directory does not exist, but will create necessary subdirectories.
 
 This directory should contain your custom strategies, custom hyperopts and hyperopt loss functions, backtesting historical data (downloaded using either backtesting command or the download script) and plot outputs.
@@ -4159,24 +4165,24 @@ Example list-data
 > freqtrade list-data --userdir ~/.freqtrade/user_data/
 
               Found 33 pair / timeframe combinations.
-┏━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━┓
-┃          Pair ┃                                 Timeframe ┃ Type ┃
-┡━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━┩
-│       ADA/BTC │     5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d │ spot │
-│       ADA/ETH │     5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d │ spot │
-│       ETH/BTC │     5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d │ spot │
-│      ETH/USDT │                  5m, 15m, 30m, 1h, 2h, 4h │ spot │
-└───────────────┴───────────────────────────────────────────┴──────┘
+â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”³â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”³â”â”â”â”â”â”â”“
+â”ƒ          Pair â”ƒ                                 Timeframe â”ƒ Type â”ƒ
+â”¡â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â•‡â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â•‡â”â”â”â”â”â”â”©
+â”‚       ADA/BTC â”‚     5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d â”‚ spot â”‚
+â”‚       ADA/ETH â”‚     5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d â”‚ spot â”‚
+â”‚       ETH/BTC â”‚     5m, 15m, 30m, 1h, 2h, 4h, 6h, 12h, 1d â”‚ spot â”‚
+â”‚      ETH/USDT â”‚                  5m, 15m, 30m, 1h, 2h, 4h â”‚ spot â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”˜
 Show all trades data including from/to timerange
 
 
 > freqtrade list-data --show --trades
                      Found trades data for 1 pair.                     
-┏━━━━━━━━━┳━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━┓
-┃    Pair ┃ Type ┃                From ┃                  To ┃ Trades ┃
-┡━━━━━━━━━╇━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━┩
-│ XRP/ETH │ spot │ 2019-10-11 00:00:11 │ 2019-10-13 11:19:28 │  12477 │
-└─────────┴──────┴─────────────────────┴─────────────────────┴────────┘
+â”â”â”â”â”â”â”â”â”â”â”³â”â”â”â”â”â”â”³â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”³â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”³â”â”â”â”â”â”â”â”â”“
+â”ƒ    Pair â”ƒ Type â”ƒ                From â”ƒ                  To â”ƒ Trades â”ƒ
+â”¡â”â”â”â”â”â”â”â”â”â•‡â”â”â”â”â”â”â•‡â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â•‡â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â”â•‡â”â”â”â”â”â”â”â”â”©
+â”‚ XRP/ETH â”‚ spot â”‚ 2019-10-11 00:00:11 â”‚ 2019-10-13 11:19:28 â”‚  12477 â”‚
+â””â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”´â”€â”€â”€â”€â”€â”€â”€â”€â”˜
 Trades (tick) data
 By default, download-data sub-command downloads Candles (OHLCV) data. Most exchanges also provide historic trade-data via their API. This data can be useful if you need many different timeframes, since it is only downloaded once, and then resampled locally to the desired timeframes.
 
@@ -4584,7 +4590,7 @@ Total/Daily Avg Trades: Identical to the total trades of the backtest output tab
 Starting balance: Start balance - as given by dry-run-wallet (config or command line).
 Final balance: Final balance - starting balance + absolute profit.
 Absolute profit: Profit made in stake currency.
-Total profit %: Total profit. Aligned to the TOTAL row's Tot Profit % from the first table. Calculated as (End capital − Starting capital) / Starting capital.
+Total profit %: Total profit. Aligned to the TOTAL row's Tot Profit % from the first table. Calculated as (End capital âˆ’ Starting capital) / Starting capital.
 CAGR %: Compound annual growth rate.
 Sortino: Annualized Sortino ratio.
 Sharpe: Annualized Sharpe ratio.
@@ -6135,16 +6141,16 @@ Warning
 Using --reset may result in loss of data, since this will overwrite all sample files without asking again.
 
 
-├── backtest_results
-├── data
-├── hyperopt_results
-├── hyperopts
-│   ├── sample_hyperopt_loss.py
-├── notebooks
-│   └── strategy_analysis_example.ipynb
-├── plot
-└── strategies
-    └── sample_strategy.py
+â”œâ”€â”€ backtest_results
+â”œâ”€â”€ data
+â”œâ”€â”€ hyperopt_results
+â”œâ”€â”€ hyperopts
+â”‚   â”œâ”€â”€ sample_hyperopt_loss.py
+â”œâ”€â”€ notebooks
+â”‚   â””â”€â”€ strategy_analysis_example.ipynb
+â”œâ”€â”€ plot
+â””â”€â”€ strategies
+    â””â”€â”€ sample_strategy.py
 Create new config
 Creates a new configuration file, asking some questions which are important selections for a configuration.
 
@@ -6969,10 +6975,10 @@ Defaults to 0.05
 
 A ratio specifying how large of a safety net to place between the liquidation price and the stoploss to prevent a position from reaching the liquidation price. This artificial liquidation price is calculated as:
 
-freqtrade_liquidation_price = liquidation_price ± (abs(open_rate - liquidation_price) * liquidation_buffer)
+freqtrade_liquidation_price = liquidation_price Â± (abs(open_rate - liquidation_price) * liquidation_buffer)
 
-± = + for long trades
-± = - for short trades
+Â± = + for long trades
+Â± = - for short trades
 Possible values are any floats between 0.0 and 0.99
 
 ex: If a trade is entered at a price of 10 coin/USDT, and the liquidation price of this trade is 8 coin/USDT, then with liquidation_buffer set to 0.05 the minimum stoploss for this trade would be 

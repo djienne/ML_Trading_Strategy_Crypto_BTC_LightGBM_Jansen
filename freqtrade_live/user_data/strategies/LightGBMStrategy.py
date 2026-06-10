@@ -37,6 +37,11 @@ class LightGBMStrategy(IStrategy):
     - loading the published strategy contract from model_info.json
     - computing rolling quantiles from the shared prediction history
     - deriving hysteresis state from the same shared signal engine
+    - publishing level-based entry/exit flags (enter while desired==1, exit
+      while desired==0) so missed fills retry on the next candle and the held
+      bars satisfy position[T+1] = desired[T]
+    - keeping startup_candle_count large enough that the kline window always
+      covers the last month boundary, the state machine's reset point
     """
 
     INTERFACE_VERSION = 3

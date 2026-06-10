@@ -11,14 +11,13 @@ Show performance for LightGBM strategy Freqtrade containers.
   (src/backtest.py), so it is comparable to grid-search Sharpe numbers
 """
 
-import math
-
 import json
+import math
 import re
 import subprocess
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Iterable
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 import requests
 from requests.auth import HTTPBasicAuth
@@ -26,92 +25,91 @@ from requests.auth import HTTPBasicAuth
 SCRIPT_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "user_data" / "config.json"
 
-# Read API credentials from project config
-try:
-    _cfg = json.loads(CONFIG_PATH.read_text())
-    _api = _cfg.get("api_server", {})
-    USERNAME = _api.get("username", "freqtrader")
-    PASSWORD = _api.get("password", "")
-except (FileNotFoundError, json.JSONDecodeError):
-    USERNAME = "freqtrader"
-    PASSWORD = ""
-
 TIMEOUT = 3  # seconds
 CONTAINER_KEYWORD = "lgbm"  # Filter containers containing this keyword
 
 PORT_RE = re.compile(r"(?:\d{1,3}(?:\.\d{1,3}){3}:)?(\d+)->8080/tcp")
+ANSI_RE = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
 
-# ANSI Color codes
+
+def load_api_auth() -> HTTPBasicAuth:
+    """Read API credentials from the project config."""
+    try:
+        api = json.loads(CONFIG_PATH.read_text()).get("api_server", {})
+        return HTTPBasicAuth(api.get("username", "freqtrader"), api.get("password", ""))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return HTTPBasicAuth("freqtrader", "")
+
+
+# ---- ANSI colors ----
+
 class Colors:
     RESET = '\033[0m'
     BOLD = '\033[1m'
     DIM = '\033[2m'
-    # Text colors
-    RED = '\033[31m'
     GREEN = '\033[32m'
     YELLOW = '\033[33m'
-    BLUE = '\033[34m'
-    MAGENTA = '\033[35m'
     CYAN = '\033[36m'
     WHITE = '\033[37m'
-    # Bright colors
     BRIGHT_RED = '\033[91m'
     BRIGHT_GREEN = '\033[92m'
     BRIGHT_BLUE = '\033[94m'
     BRIGHT_MAGENTA = '\033[95m'
-    BRIGHT_CYAN = '\033[96m'
     BRIGHT_WHITE = '\033[97m'
 
+
+NO_DATA = f"{Colors.DIM}-{Colors.RESET}"
+
+
+def good_bad(text: str, good: bool) -> str:
+    color = Colors.BRIGHT_GREEN if good else Colors.BRIGHT_RED
+    return f"{color}{text}{Colors.RESET}"
+
+
 def colorize_profit(value: Optional[float]) -> str:
-    if value is None:
-        return f"{Colors.DIM}-{Colors.RESET}"
-    pct_str = f"{value:.2f}%"
-    return f"{Colors.BRIGHT_GREEN}{pct_str}{Colors.RESET}" if value > 0 else f"{Colors.BRIGHT_RED}{pct_str}{Colors.RESET}"
+    return NO_DATA if value is None else good_bad(f"{value:.2f}%", value > 0)
+
 
 def colorize_win_rate(value: Optional[float]) -> str:
-    if value is None:
-        return f"{Colors.DIM}-{Colors.RESET}"
-    pct_str = f"{value:.2f}%"
-    return f"{Colors.BRIGHT_GREEN}{pct_str}{Colors.RESET}" if value >= 50 else f"{Colors.BRIGHT_RED}{pct_str}{Colors.RESET}"
+    return NO_DATA if value is None else good_bad(f"{value:.2f}%", value >= 50)
+
 
 def colorize_profit_factor(pf_str: str) -> str:
     if pf_str == "-":
-        return f"{Colors.DIM}-{Colors.RESET}"
+        return NO_DATA
     try:
-        pf_val = float(pf_str)
-        return f"{Colors.BRIGHT_GREEN}{pf_str}{Colors.RESET}" if pf_val >= 1.0 else f"{Colors.BRIGHT_RED}{pf_str}{Colors.RESET}"
+        return good_bad(pf_str, float(pf_str) >= 1.0)
     except ValueError:
         return f"{Colors.DIM}{pf_str}{Colors.RESET}"
 
-def colorize_cagr(value: Optional[float]) -> str:
-    if value is None:
-        return f"{Colors.DIM}-{Colors.RESET}"
-    pct_str = f"{value:.2f}%"
-    return f"{Colors.BRIGHT_GREEN}{pct_str}{Colors.RESET}" if value > 10 else f"{Colors.BRIGHT_RED}{pct_str}{Colors.RESET}"
 
 def colorize_sharpe(value: Optional[float]) -> str:
-    if value is None:
-        return f"{Colors.DIM}-{Colors.RESET}"
-    val_str = f"{value:.2f}"
-    return f"{Colors.BRIGHT_GREEN}{val_str}{Colors.RESET}" if value >= 1.0 else f"{Colors.BRIGHT_RED}{val_str}{Colors.RESET}"
+    return NO_DATA if value is None else good_bad(f"{value:.2f}", value >= 1.0)
+
+
+def colorize_cagr(value: Optional[float]) -> str:
+    return NO_DATA if value is None else good_bad(f"{value:.2f}%", value > 10)
+
 
 def colorize_drawdown(value: Optional[float]) -> str:
     if value is None:
-        return f"{Colors.DIM}-{Colors.RESET}"
-    pct_str = f"{value:.2f}%"
-    return f"{Colors.WHITE}{pct_str}{Colors.RESET}" if value == 0 else f"{Colors.BRIGHT_RED}{pct_str}{Colors.RESET}"
+        return NO_DATA
+    color = Colors.WHITE if value == 0 else Colors.BRIGHT_RED
+    return f"{color}{value:.2f}%{Colors.RESET}"
+
 
 def colorize_trades(trades: Any) -> str:
     if trades == "-":
-        return f"{Colors.DIM}-{Colors.RESET}"
+        return NO_DATA
     try:
         return f"{int(trades)}"
     except (ValueError, TypeError):
         return f"{Colors.DIM}{trades}{Colors.RESET}"
 
+
 def colorize_last_trade(value: Optional[str], timestamp_ms: Optional[int]) -> str:
     if not value or timestamp_ms is None:
-        return f"{Colors.DIM}-{Colors.RESET}"
+        return NO_DATA
     try:
         trade_date = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
         elapsed_hours = (datetime.now(timezone.utc) - trade_date).total_seconds() / 3600.0
@@ -123,28 +121,10 @@ def colorize_last_trade(value: Optional[str], timestamp_ms: Optional[int]) -> st
         return f"{Colors.YELLOW}{value}{Colors.RESET}"
     return f"{Colors.BRIGHT_RED}{value}{Colors.RESET}"
 
-def colorize_container_name(name: str) -> str:
-    return f"{Colors.BOLD}{Colors.BRIGHT_BLUE}{name}{Colors.RESET}"
 
-def colorize_port(port: Any) -> str:
-    if port == "-":
-        return f"{Colors.DIM}-{Colors.RESET}"
-    return f"{Colors.BRIGHT_MAGENTA}{port}{Colors.RESET}"
+def colorize_tagged(value: Any, color: str) -> str:
+    return NO_DATA if value == "-" else f"{color}{value}{Colors.RESET}"
 
-def colorize_strategy(strategy: str) -> str:
-    if strategy == "-":
-        return f"{Colors.DIM}-{Colors.RESET}"
-    return f"{Colors.YELLOW}{strategy}{Colors.RESET}"
-
-def colorize_bot_name(bot: str) -> str:
-    if bot == "-":
-        return f"{Colors.DIM}-{Colors.RESET}"
-    return f"{Colors.CYAN}{bot}{Colors.RESET}"
-
-def colorize_days(days: Optional[int]) -> str:
-    if days is None:
-        return f"{Colors.DIM}-{Colors.RESET}"
-    return f"{days}"
 
 # ---- Robust date parsing helpers ----
 
@@ -156,14 +136,12 @@ def try_parse_dt(val: Any) -> Optional[int]:
     """
     if val is None:
         return None
-    # numeric
     if isinstance(val, (int, float)):
         if val > 1e12:      # ms
             return int(val)
         if val > 1e9:       # s
             return int(val * 1000)
         return None
-    # string
     if isinstance(val, str):
         s = val.strip()
         try:
@@ -173,7 +151,6 @@ def try_parse_dt(val: Any) -> Optional[int]:
             return int(dt.timestamp() * 1000)
         except Exception:
             return None
-    # dict or other: try common keys
     if isinstance(val, dict):
         for k in ("open_date", "open_at", "open_time", "opened_at", "date_open", "date"):
             ts = try_parse_dt(val.get(k))
@@ -181,10 +158,9 @@ def try_parse_dt(val: Any) -> Optional[int]:
                 return ts
     return None
 
+
 def extract_first_ts_from_any(obj: Any, keys: Iterable[str]) -> Optional[int]:
-    """
-    Search dict OR list-of-dicts for the first parseable timestamp in given keys.
-    """
+    """Search dict OR list-of-dicts for the first parseable timestamp in given keys."""
     if obj is None:
         return None
     if isinstance(obj, dict):
@@ -201,6 +177,7 @@ def extract_first_ts_from_any(obj: Any, keys: Iterable[str]) -> Optional[int]:
         return None
     return None
 
+
 def extract_earliest_open_ts_from_trades(trades_list: Iterable[Dict[str, Any]]) -> Optional[int]:
     candidates: List[int] = []
     for t in trades_list or []:
@@ -210,6 +187,7 @@ def extract_earliest_open_ts_from_trades(trades_list: Iterable[Dict[str, Any]]) 
                 candidates.append(ts)
                 break
     return min(candidates) if candidates else None
+
 
 def extract_latest_ts_from_trades(trades_list: Iterable[Dict[str, Any]]) -> Optional[int]:
     candidates: List[int] = []
@@ -244,6 +222,7 @@ def extract_latest_ts_from_trades(trades_list: Iterable[Dict[str, Any]]) -> Opti
                         candidates.append(ts)
     return max(candidates) if candidates else None
 
+
 # ---- IO helpers ----
 
 def docker_containers() -> List[Dict[str, Optional[int]]]:
@@ -262,6 +241,7 @@ def docker_containers() -> List[Dict[str, Optional[int]]]:
         rows.append({"name": name.strip(), "port": port})
     return rows
 
+
 def get_json(url: str, auth: HTTPBasicAuth) -> Optional[Any]:
     try:
         r = requests.get(url, auth=auth, timeout=TIMEOUT)
@@ -271,79 +251,80 @@ def get_json(url: str, auth: HTTPBasicAuth) -> Optional[Any]:
         pass
     return None
 
-def get_first_trade_timestamp(base: str, auth: HTTPBasicAuth, prof: Optional[Dict[str, Any]]) -> Optional[int]:
+
+def normalize_trades(data: Any) -> List[Dict[str, Any]]:
+    """Unwrap the various shapes /trades-style endpoints return into a list of dicts."""
+    if isinstance(data, dict):
+        data = data.get("trades") or data.get("data") or []
+    if not isinstance(data, list):
+        return []
+    return [t for t in data if isinstance(t, dict)]
+
+
+def fetch_trades_list(base: str, auth: HTTPBasicAuth) -> List[Dict[str, Any]]:
+    for url in (f"{base}/trades?limit=5000", f"{base}/trades"):
+        trades = normalize_trades(get_json(url, auth))
+        if trades:
+            return trades
+    return []
+
+
+def get_first_trade_timestamp(
+    base: str,
+    auth: HTTPBasicAuth,
+    prof: Dict[str, Any],
+    trades_list: List[Dict[str, Any]],
+) -> Optional[int]:
     """
     Robustly find the timestamp (ms) of the earliest trade (open or closed).
     Try, in order:
       1) /status (dict OR list) fields like 'first_trade_date' or 'first_trade_timestamp'
       2) hints on /profit
-      3) /trades (any shape) → earliest open date across items
+      3) the prefetched /trades list → earliest open date across items
       4) /closed_trades then /open_trades (fallbacks)
     """
-    # 1) /status
     status = get_json(f"{base}/status", auth)
     ts = extract_first_ts_from_any(status, ("first_trade_date", "first_trade_timestamp", "first_trade"))
     if ts:
         return ts
 
-    # 2) /profit hints
-    if isinstance(prof, dict):
-        ts = extract_first_ts_from_any(prof, ("first_trade_date", "first_trade_timestamp"))
+    ts = extract_first_ts_from_any(prof, ("first_trade_date", "first_trade_timestamp"))
+    if ts:
+        return ts
+
+    ts = extract_earliest_open_ts_from_trades(trades_list)
+    if ts:
+        return ts
+
+    for endpoint in ("closed_trades", "open_trades"):
+        data = get_json(f"{base}/{endpoint}", auth)
+        if isinstance(data, dict) and endpoint in data:
+            data = data[endpoint]
+        ts = extract_earliest_open_ts_from_trades(normalize_trades(data))
         if ts:
             return ts
 
-    # 3) /trades
-    for url in (
-        f"{base}/trades?limit=5000",  # big net to find earliest
-        f"{base}/trades",
-    ):
-        data = get_json(url, auth)
-        if data:
-            trades_list = (data.get("trades") or data.get("data") or data) if isinstance(data, (dict, list)) else []
-            if not isinstance(trades_list, list):
-                trades_list = []
-            ts = extract_earliest_open_ts_from_trades(trades_list)
-            if ts:
-                return ts
-
-    # 4) explicit closed/open endpoints
-    for endpoint in ("closed_trades", "open_trades"):
-        data = get_json(f"{base}/{endpoint}", auth)
-        if data:
-            items = (data.get(endpoint) or data.get("data") or data) if isinstance(data, (dict, list)) else []
-            if not isinstance(items, list):
-                items = []
-            ts = extract_earliest_open_ts_from_trades(items)
-            if ts:
-                return ts
-
     return None
 
-def get_last_trade_timestamp(base: str, auth: HTTPBasicAuth, prof: Optional[Dict[str, Any]]) -> Optional[int]:
+
+def get_last_trade_timestamp(
+    trades_list: List[Dict[str, Any]],
+    prof: Dict[str, Any],
+) -> Optional[int]:
     """
     Find the newest known trade timestamp in milliseconds.
     Prefer full trade/order details, then fall back to /profit's latest trade hint.
     """
-    for url in (
-        f"{base}/trades?limit=5000",
-        f"{base}/trades",
-    ):
-        data = get_json(url, auth)
-        if data:
-            trades_list = (data.get("trades") or data.get("data") or data) if isinstance(data, (dict, list)) else []
-            if not isinstance(trades_list, list):
-                trades_list = []
-            ts = extract_latest_ts_from_trades(trades_list)
-            if ts:
-                return ts
+    ts = extract_latest_ts_from_trades(trades_list)
+    if ts:
+        return ts
+    return extract_first_ts_from_any(
+        prof,
+        ("latest_trade_timestamp", "latest_trade_date", "latest_trade"),
+    )
 
-    if isinstance(prof, dict):
-        return extract_first_ts_from_any(
-            prof,
-            ("latest_trade_timestamp", "latest_trade_date", "latest_trade"),
-        )
 
-    return None
+# ---- Metrics ----
 
 def calculate_cagr(profit_all_percent: Optional[float], first_trade_timestamp_ms: Optional[int]) -> Optional[float]:
     """
@@ -354,8 +335,7 @@ def calculate_cagr(profit_all_percent: Optional[float], first_trade_timestamp_ms
         return None
     try:
         first_trade_date = datetime.fromtimestamp(first_trade_timestamp_ms / 1000, tz=timezone.utc)
-        current_date = datetime.now(timezone.utc)
-        elapsed_days = (current_date - first_trade_date).total_seconds() / 86400.0
+        elapsed_days = (datetime.now(timezone.utc) - first_trade_date).total_seconds() / 86400.0
         if elapsed_days <= 0:
             return None
 
@@ -364,10 +344,10 @@ def calculate_cagr(profit_all_percent: Optional[float], first_trade_timestamp_ms
         if ending_value <= 0:
             return None  # nuked account case
 
-        cagr = (pow(ending_value / 100.0, 1.0 / years_elapsed) - 1.0) * 100.0
-        return cagr
+        return (pow(ending_value / 100.0, 1.0 / years_elapsed) - 1.0) * 100.0
     except Exception:
         return None
+
 
 def timeframe_minutes(timeframe: Optional[str]) -> int:
     """Parse a freqtrade timeframe ('15m', '1h', '1d') to minutes; default 15."""
@@ -379,14 +359,6 @@ def timeframe_minutes(timeframe: Optional[str]) -> int:
     except (KeyError, ValueError):
         return 15
 
-def fetch_trades_list(base: str, auth: HTTPBasicAuth) -> List[Dict[str, Any]]:
-    for url in (f"{base}/trades?limit=5000", f"{base}/trades"):
-        data = get_json(url, auth)
-        if data:
-            trades_list = (data.get("trades") or data.get("data") or data) if isinstance(data, (dict, list)) else []
-            if isinstance(trades_list, list) and trades_list:
-                return trades_list
-    return []
 
 def calculate_annualized_sharpe(
     trades_list: Iterable[Dict[str, Any]],
@@ -436,18 +408,19 @@ def calculate_annualized_sharpe(
     bars_per_year = 365.25 * 24 * 60 / tf_min
     return mean / math.sqrt(var) * math.sqrt(bars_per_year)
 
+
 def days_since_first_trade(first_trade_timestamp_ms: Optional[int]) -> Optional[int]:
     if first_trade_timestamp_ms is None:
         return None
     try:
         first_trade_date = datetime.fromtimestamp(first_trade_timestamp_ms / 1000, tz=timezone.utc)
-        current_date = datetime.now(timezone.utc)
-        elapsed_days = (current_date - first_trade_date).total_seconds() / 86400.0
+        elapsed_days = (datetime.now(timezone.utc) - first_trade_date).total_seconds() / 86400.0
         if elapsed_days < 0:
             return None
         return int(elapsed_days)  # floor to whole days
     except Exception:
         return None
+
 
 def format_since_timestamp(timestamp_ms: Optional[int]) -> Optional[str]:
     if timestamp_ms is None:
@@ -472,11 +445,142 @@ def format_since_timestamp(timestamp_ms: Optional[int]) -> Optional[str]:
     hrs = hours % 24
     return f"{days}d {hrs}h ago" if hrs else f"{days}d ago"
 
-def pct(x: Optional[float]) -> str:
-    return "-" if x is None else f"{x:.2f}%"
+
+# ---- Table rendering ----
+
+HEADERS = [
+    ("CONTAINER", "container"),
+    ("PORT", "port"),
+    ("BOT", "bot"),
+    ("STRATEGY", "strategy"),
+    ("TRADES", "trades"),
+    ("LAST TRADE", "last_trade"),
+    ("WIN RATE", "win_rate"),
+    ("PROFIT ALL", "profit_all"),
+    ("PROFIT CLOSED", "profit_closed"),
+    ("PF", "pf"),
+    ("SHARPE", "sharpe"),
+    ("MAX DD", "max_dd"),
+    ("DAYS", "days"),
+    ("CAGR", "cagr"),
+]
+
+CELL_RENDERERS: Dict[str, Callable[[Dict[str, Any]], str]] = {
+    "container": lambda r: f"{Colors.BOLD}{Colors.BRIGHT_BLUE}{r['container']}{Colors.RESET}",
+    "port": lambda r: colorize_tagged(r["port"], Colors.BRIGHT_MAGENTA),
+    "bot": lambda r: colorize_tagged(r["bot"], Colors.CYAN),
+    "strategy": lambda r: colorize_tagged(r["strategy"], Colors.YELLOW),
+    "trades": lambda r: colorize_trades(r["trades"]),
+    "last_trade": lambda r: colorize_last_trade(r["last_trade"], r["last_trade_ts"]),
+    "win_rate": lambda r: colorize_win_rate(r["win_rate"]),
+    "profit_all": lambda r: colorize_profit(r["profit_all"]),
+    "profit_closed": lambda r: colorize_profit(r["profit_closed"]),
+    "pf": lambda r: colorize_profit_factor(str(r["pf"])),
+    "sharpe": lambda r: colorize_sharpe(r["sharpe"]),
+    "max_dd": lambda r: colorize_drawdown(r["max_dd"]),
+    "days": lambda r: NO_DATA if r["days"] is None else str(r["days"]),
+    "cagr": lambda r: colorize_cagr(r["cagr"]),
+}
+
+
+def make_row(name: str, **values: Any) -> Dict[str, Any]:
+    """Row dict with no-data defaults; pass keyword overrides for known fields."""
+    row: Dict[str, Any] = {
+        "container": name,
+        "port": "-",
+        "bot": "-",
+        "strategy": "-",
+        "trades": "-",
+        "last_trade": None,
+        "last_trade_ts": None,
+        "win_rate": None,
+        "profit_all": None,
+        "profit_closed": None,
+        "pf": "-",
+        "sharpe": None,
+        "max_dd": None,
+        "days": None,
+        "cagr": None,
+    }
+    row.update(values)
+    return row
+
+
+def plain_text_len(text: str) -> int:
+    return len(ANSI_RE.sub('', text))
+
+
+def container_row(name: str, port: int, auth: HTTPBasicAuth) -> Dict[str, Any]:
+    base = f"http://127.0.0.1:{port}/api/v1"
+    cfg = get_json(f"{base}/show_config", auth) or {}
+    bot_name = cfg.get("bot_name") or "-"
+    strategy = cfg.get("strategy") or "-"
+
+    prof = get_json(f"{base}/profit", auth)
+    if not isinstance(prof, dict) or not prof:
+        return make_row(name, port=port, bot=bot_name, strategy=strategy)
+
+    trades_list = fetch_trades_list(base, auth)
+    first_trade_ts = get_first_trade_timestamp(base, auth, prof, trades_list)
+    last_trade_ts = get_last_trade_timestamp(trades_list, prof)
+
+    wins = prof.get("winning_trades") or 0
+    losses = prof.get("losing_trades") or 0
+    closed = wins + losses
+
+    pf = prof.get("profit_factor")
+    mdd = prof.get("max_drawdown")
+    mdd_pct = None if mdd is None else (mdd * 100 if isinstance(mdd, (int, float)) and abs(mdd) <= 1 else float(mdd))
+
+    profit_all = prof.get("profit_all_percent")
+
+    return make_row(
+        name,
+        port=port,
+        bot=bot_name,
+        strategy=strategy,
+        trades=prof.get("trade_count") or 0,
+        last_trade=format_since_timestamp(last_trade_ts),
+        last_trade_ts=last_trade_ts,
+        win_rate=(wins / closed * 100.0) if closed else None,
+        profit_all=profit_all,
+        profit_closed=prof.get("profit_closed_percent"),
+        pf="-" if pf is None else f"{pf:.2f}",
+        sharpe=calculate_annualized_sharpe(trades_list, cfg.get("timeframe")),
+        max_dd=mdd_pct,
+        days=days_since_first_trade(first_trade_ts),
+        cagr=calculate_cagr(profit_all, first_trade_ts),
+    )
+
+
+def print_table(rows: List[Dict[str, Any]]) -> None:
+    def sort_key(r: Dict[str, Any]):
+        has_data = 0 if r["trades"] == "-" else 1
+        pa = r.get("profit_all")
+        return (has_data, pa if isinstance(pa, (int, float)) else float("-inf"), r.get("trades") or -1)
+
+    rows = sorted(rows, key=sort_key, reverse=True)
+    rendered = [[CELL_RENDERERS[key](r) for _, key in HEADERS] for r in rows]
+
+    col_w = [
+        max(len(title), *(plain_text_len(row[i]) for row in rendered)) if rendered else len(title)
+        for i, (title, _) in enumerate(HEADERS)
+    ]
+
+    header_row = " | ".join(
+        f"{Colors.BOLD}{Colors.WHITE}{title:<{col_w[i]}}{Colors.RESET}"
+        for i, (title, _) in enumerate(HEADERS)
+    )
+    separator = "-+-".join("-" * w for w in col_w)
+    print(header_row)
+    print(f"{Colors.DIM}{separator}{Colors.RESET}")
+
+    for row in rendered:
+        print(" | ".join(text + " " * (col_w[i] - plain_text_len(text)) for i, text in enumerate(row)))
+
 
 def main() -> None:
-    auth = HTTPBasicAuth(USERNAME, PASSWORD)
+    auth = load_api_auth()
 
     print(f"\n{Colors.BOLD}{Colors.BRIGHT_WHITE}LightGBM Strategy - Performance Monitor{Colors.RESET}")
     print(f"{Colors.DIM}Searching for containers with '{CONTAINER_KEYWORD}' in the name...{Colors.RESET}\n")
@@ -488,200 +592,23 @@ def main() -> None:
 
     print(f"{Colors.GREEN}Found {len(conts)} container(s) with '{CONTAINER_KEYWORD}' in the name{Colors.RESET}\n")
 
-    rows: List[Dict[str, Any]] = []
-    for c in conts:
-        name, port = c["name"], c["port"]
-        strategy = "-"
-        bot_name = "-"
-
-        if port is None:
-            rows.append(
-                {
-                    "container": name,
-                    "port": "-",
-                    "bot": bot_name,
-                    "strategy": strategy,
-                    "trades": "-",
-                    "last_trade": None,
-                    "last_trade_ts": None,
-                    "win_rate": None,
-                    "profit_all": None,
-                    "profit_closed": None,
-                    "pf": "-",
-                    "sharpe": None,
-                    "max_dd": None,
-                    "days": None,
-                    "cagr": None,
-                }
-            )
-            continue
-
-        base = f"http://127.0.0.1:{port}/api/v1"
-        cfg = get_json(f"{base}/show_config", auth) or {}
-        bot_name = cfg.get("bot_name") or "-"
-        strategy = cfg.get("strategy") or "-"
-
-        prof = get_json(f"{base}/profit", auth)
-        if not prof:
-            rows.append(
-                {
-                    "container": name,
-                    "port": port,
-                    "bot": bot_name,
-                    "strategy": strategy,
-                    "trades": "-",
-                    "last_trade": None,
-                    "last_trade_ts": None,
-                    "win_rate": None,
-                    "profit_all": None,
-                    "profit_closed": None,
-                    "pf": "-",
-                    "sharpe": None,
-                    "max_dd": None,
-                    "days": None,
-                    "cagr": None,
-                }
-            )
-            continue
-
-        first_trade_ts = get_first_trade_timestamp(base, auth, prof)
-        last_trade_ts = get_last_trade_timestamp(base, auth, prof)
-        last_trade = format_since_timestamp(last_trade_ts)
-
-        w = (prof.get("winning_trades") or 0) if isinstance(prof, dict) else 0
-        l = (prof.get("losing_trades") or 0) if isinstance(prof, dict) else 0
-        tc = (prof.get("trade_count") or 0) if isinstance(prof, dict) else 0
-        closed = w + l
-        win_rate = (w / closed * 100.0) if closed else None
-
-        pf = (prof.get("profit_factor") if isinstance(prof, dict) else None)
-        pf_str = "-" if pf is None else f"{pf:.2f}"
-
-        mdd = (prof.get("max_drawdown") if isinstance(prof, dict) else None)
-        mdd_pct = None if mdd is None else (mdd * 100 if isinstance(mdd, (int, float)) and abs(mdd) <= 1 else float(mdd))
-
-        profit_all = (prof.get("profit_all_percent") if isinstance(prof, dict) else None)
-        cagr = calculate_cagr(profit_all, first_trade_ts)
-        days = days_since_first_trade(first_trade_ts)
-        sharpe = calculate_annualized_sharpe(
-            fetch_trades_list(base, auth),
-            cfg.get("timeframe"),
-        )
-
-        rows.append(
-            {
-                "container": name,
-                "port": port,
-                "bot": bot_name,
-                "strategy": strategy,
-                "trades": tc,
-                "last_trade": last_trade,
-                "last_trade_ts": last_trade_ts,
-                "win_rate": win_rate,
-                "profit_all": profit_all,
-                "profit_closed": prof.get("profit_closed_percent") if isinstance(prof, dict) else None,
-                "pf": pf_str,
-                "sharpe": sharpe,
-                "max_dd": mdd_pct,
-                "days": days,
-                "cagr": cagr,
-            }
-        )
-
-    headers = [
-        ("CONTAINER", "container"),
-        ("PORT", "port"),
-        ("BOT", "bot"),
-        ("STRATEGY", "strategy"),
-        ("TRADES", "trades"),
-        ("LAST TRADE", "last_trade"),
-        ("WIN RATE", "win_rate"),
-        ("PROFIT ALL", "profit_all"),
-        ("PROFIT CLOSED", "profit_closed"),
-        ("PF", "pf"),
-        ("SHARPE", "sharpe"),
-        ("MAX DD", "max_dd"),
-        ("DAYS", "days"),
-        ("CAGR", "cagr"),
+    rows = [
+        container_row(c["name"], c["port"], auth) if c["port"] is not None else make_row(c["name"])
+        for c in conts
     ]
-
-    def cell(key: str, r: Dict[str, Any]) -> str:
-        v = r.get(key)
-        if key == "container":
-            return colorize_container_name(str(v))
-        if key == "port":
-            return colorize_port(v)
-        if key == "bot":
-            return colorize_bot_name(str(v))
-        if key == "strategy":
-            return colorize_strategy(str(v))
-        if key == "trades":
-            return colorize_trades(v)
-        if key == "last_trade":
-            return colorize_last_trade(v, r.get("last_trade_ts"))
-        if key == "win_rate":
-            return colorize_win_rate(v)
-        if key in ("profit_all", "profit_closed"):
-            return colorize_profit(v)
-        if key == "max_dd":
-            return colorize_drawdown(v)
-        if key == "pf":
-            return colorize_profit_factor(str(v))
-        if key == "sharpe":
-            return colorize_sharpe(v)
-        if key == "days":
-            return colorize_days(v)
-        if key == "cagr":
-            return colorize_cagr(v)
-        return str(v)
-
-    # strip ANSI to compute widths
-    def plain_text_len(text: str) -> int:
-        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-        return len(ansi_escape.sub('', text))
-
-    # widths
-    col_w: Dict[str, int] = {}
-    for title, key in headers:
-        w = len(title)
-        for r in rows:
-            cell_content = cell(key, r)
-            w = max(w, plain_text_len(cell_content))
-        col_w[title] = w
-
-    # header
-    header_row = " | ".join(f"{Colors.BOLD}{Colors.WHITE}{t:<{col_w[t]}}{Colors.RESET}" for t, _ in headers)
-    separator = "-+-".join("-" * col_w[t] for t, _ in headers)
-    print(header_row)
-    print(f"{Colors.DIM}{separator}{Colors.RESET}")
-
-    # sort
-    def sort_key(r: Dict[str, Any]):
-        has_data = 0 if r["trades"] == "-" else 1
-        pa = r.get("profit_all")
-        return (has_data, pa if isinstance(pa, (int, float)) else float("-inf"), r.get("trades") or -1)
-
-    rows.sort(key=sort_key, reverse=True)
-
-    # rows
-    for r in rows:
-        row_cells = []
-        for title, key in headers:
-            cell_content = cell(key, r)
-            padding = col_w[title] - plain_text_len(cell_content)
-            row_cells.append(cell_content + " " * padding)
-        print(" | ".join(row_cells))
+    print_table(rows)
 
     print(
         f"\n{Colors.DIM}Legend:{Colors.RESET} "
         f"{Colors.BRIGHT_GREEN}Good{Colors.RESET} | {Colors.BRIGHT_RED}Bad{Colors.RESET} | {Colors.DIM}No Data{Colors.RESET}"
     )
     print(
-        f"{Colors.DIM}Rules: Profit >0 good | Win Rate >=50% good | PF >=1.0 good | Sharpe >=1.0 good | CAGR >10% good{Colors.RESET}\n"
+        f"{Colors.DIM}Rules: Profit >0 good | Win Rate >=50% good | PF >=1.0 good | Sharpe >=1.0 good | CAGR >10% good{Colors.RESET}"
     )
     print(
         f"{Colors.DIM}Sharpe: annualized, per-bar returns with flat bars = 0 (same convention as src/backtest.py).{Colors.RESET}\n"
     )
+
 
 if __name__ == "__main__":
     main()

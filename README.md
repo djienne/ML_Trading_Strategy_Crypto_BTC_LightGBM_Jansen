@@ -9,6 +9,8 @@ The pipeline supports any candle interval shorter than 1 month (e.g., 1m, 5m, 1h
   <figcaption>Equity curve for the deployed 15m contract (data through 2026-07-04).</figcaption>
 </figure>
 
+**Associated YouTube video:** [Watch on YouTube](https://youtu.be/f4HoOeE3-Zk)
+
 ## Requirements
 
 - Python 3.10+

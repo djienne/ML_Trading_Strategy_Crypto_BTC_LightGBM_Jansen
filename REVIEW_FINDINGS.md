@@ -122,7 +122,8 @@ exact future diffs (including quantile knife-edge analysis).
 - **Stoploss:** vectorized backtest triggers on cumulative open→close returns,
   not intrabar lows (documented in `_apply_stoploss`). No dry-run stoploss has
   fired to date.
-- **Fees/fills:** backtest charges 0.05%/side at next-bar open; live uses
+- **Fees/fills:** backtest charges a flat fee per side at next-bar open
+  (0.05% at the time of this review; 0.03% default since 2026-07-04); live uses
   maker-side limit orders (cheaper when filled, ~0.12 pp/trade observed fill
   noise). Funding fees are not modeled (see EXPECTED_PERFORMANCE.md).
 - **Month-start handoff:** research OOF predictions skip the first 20 bars of

@@ -2,11 +2,11 @@
 
 This repo implements a modular ML trading strategy workflow inspired by the Chapter 12 of "Machine Learning for Algorithmic Trading" by Stefan Jansen. The pipeline is split into independent stages so you can run only what you need: download data, build features, train models (with persistence), evaluate signals, and backtest a chosen quantile.
 
-The pipeline supports any candle interval shorter than 1 month (e.g., 1m, 5m, 1h, 1d). Some plots in this README come from earlier 1-minute experiments; the currently deployed live setup (`config.json`, `freqtrade_live/`) trades BTC/USDT futures on 15-minute candles. For short timeframes (e.g., 1m/5m), profitability is only realistic with very low fees (below 0.5 bps); this is generally not achievable for taker trading, but the short-term signal could be used, for example, as alpha for a high frequency market-making model that relies on limit maker orders (very low fees, sometimes rebates).
+The pipeline supports any candle interval shorter than 1 month (e.g., 1m, 5m, 1h, 1d). The currently deployed live setup (`config.json`, `freqtrade_live/`) trades BTC/USDT futures on 15-minute candles; the plots below come from the deployed 15m contract, backtested on data through 2026-07-04 (net +277.4%, Sharpe 1.33 at the 0.03% fee assumption — see `EXPECTED_PERFORMANCE.md`). For short timeframes (e.g., 1m/5m), profitability is only realistic with very low fees (below 0.5 bps); this is generally not achievable for taker trading, but the short-term signal could be used, for example, as alpha for a high frequency market-making model that relies on limit maker orders (very low fees, sometimes rebates).
 
 <figure>
-  <img src="plot/ALL_1m_equity_q5000_longshort_5000_date.png" alt="ALL 1m equity curve (q5000 longshort, date scope)" width="700">
-  <figcaption>Equity curve for the q5000 longshort setup.</figcaption>
+  <img src="plot/ALL_15m_equity_q100_long_high_100_rolling.png" alt="ALL 15m equity curve (deployed contract, rolling quantiles)" width="700">
+  <figcaption>Equity curve for the deployed 15m contract (data through 2026-07-04).</figcaption>
 </figure>
 
 ## Requirements
@@ -295,10 +295,9 @@ of each month. Note this means any edit to those files on the host triggers a
 full retrain within the hourly poll — restart the trader afterwards so its
 in-memory code matches the new model. Training uses BTCUSDT + ETHUSDT for more
 data and less overfit, but inference is BTCUSDT-only. Model hyperparameters are
-fixed to the deployed grid-search winner (`NUM_LEAVES=31`, `FEATURE_FRACTION=0.5`,
-`MIN_DATA_IN_LEAF=50`, `LR=0.01`, `BOOST_ROUNDS=5000`); the signal-contract
-values (bins, entry/exit quantiles, direction, stoploss, fee, quantile method,
-train months) are single-sourced from `src/strategy_contract.py`. Publishing is
+fixed to the deployed grid-search winner and the signal-contract values are
+single-sourced from `src/strategy_contract.py` (see the contract table in
+`STRATEGY.md` for the values). Publishing is
 atomic: predictions are saved first, each file is written via a `.tmp` sidecar +
 `os.replace`, a snapshot of the new artifacts is copied into `archive/<stamp>/`,
 and the `current` pointer is flipped last.
@@ -311,22 +310,13 @@ whenever the `current` pointer names a new snapshot (falling back to
 `model_info.json` for timeframe / symbol / bins / entry / exit / direction /
 stoploss, and seeds rolling quantiles from `latest_predictions.feather`.
 
-Signals are **level-based** (`compute_live_level_signals`): `enter_long` is set
-while `desired_position == 1` and `exit_long` while it is `0` (NaN warmup bars
-publish nothing). Freqtrade's own trade state arbitrates, so a limit order that
-fails to fill during the signal candle is retried on the next one, and the held
-bars still satisfy `position[T+1] = desired[T]` — a single bar of execution
-delay that lands the position on exactly the candle the model predicts
-(`fwd1bar` = the next candle's return).
-
-`startup_candle_count = 3600` is a correctness invariant, not a warmup
-nicety: the hysteresis state machine restarts flat at the start of the kline
-window freqtrade provides (`ohlcv_candle_limit + startup_candle_count` bars)
-and only resets at month ends, so the window must always reach past the last
-month boundary (31-day month = 2976 bars, plus the alpha001 rank window and
-feature warmup). Each decision bar's `(prediction, quantile,
-desired_position)` is appended to `user_data/logs/signal_state.csv` for exact
-live-vs-replay diffing.
+Signals are **level-based** and the strategy relies on two invariants — a
+single bar of execution delay matching the model target, and a
+`startup_candle_count = 3600` kline window that always covers the last
+month-boundary reset — both explained in `STRATEGY.md` ("Live execution
+invariants"). Each decision bar's `(prediction, quantile, desired_position)`
+is appended to `user_data/logs/signal_state.csv` for exact live-vs-replay
+diffing.
 
 ### Replay tool
 
@@ -381,8 +371,8 @@ file; changes to the contract propagate to every consumer without manual wiring.
 ## Alpha Plot
 
 <figure>
-  <img src="plot/ALL_1m_alpha_q5000_longshort_5000_date.png" alt="ALL 1m alpha factor (q5000 longshort, date scope)" width="700">
-  <figcaption>Alpha factor derived from the standardized signal.</figcaption>
+  <img src="plot/ALL_15m_alpha_q100_long_high_100_rolling.png" alt="ALL 15m alpha factor (deployed contract, rolling quantiles)" width="700">
+  <figcaption>Alpha factor derived from the standardized signal (deployed 15m contract, data through 2026-07-04).</figcaption>
 </figure>
 
 ## Notes
@@ -390,9 +380,8 @@ file; changes to the contract propagate to every consumer without manual wiring.
 - The pipeline supports multi-symbol training and single-symbol evaluation/backtest by design; use `train_symbols` for the training set and `inference_symbol` (or `--symbol`) for evaluation/backtest.
 - Candle intervals shorter than 1 month are supported; the deployed setup uses `15m`.
 - Quantile assignment defaults to `--quantile-scope auto`, which uses `expanding` for single-symbol data and `timestamp` for multi-symbol data. Override with `--quantile-scope {timestamp,date,global,expanding}` if needed (`global` has full-sample lookahead and is for diagnostics only).
-- The backtest is a vectorized approximation meant for quick signal sanity checks, not a full execution-quality simulation.
-- The offline backtest, `backtest_live_window.py`, and the live bot all apply a single bar of execution delay between the `desired_position` value and the held candle: `desired_position == 1` on candle T means holding candle T+1, which is the candle the model's target (`fwd1bar`) actually predicts. The offline backtest bakes this into the target (`fwd1bar` = next candle's return); the replay tool shifts positions by one bar; the live bot publishes level signals and lets Freqtrade's fill-at-next-bar provide the delay.
-- All features are window-invariant at the decision bar (pinned by `tests/test_feature_window_parity.py`): alpha001 uses a fixed rolling rank window (`ALPHA001_RANK_WINDOW` in `src/features.py`) rather than an expanding rank, so live, replay, and research compute identical values regardless of where their dataframes start.
+- The backtest is a vectorized approximation meant for quick signal sanity checks, not a full execution-quality simulation (details in `EXPECTED_PERFORMANCE.md`).
+- All execution paths apply a single bar of execution delay between `desired_position` and the held candle, and all features are window-invariant at the decision bar — see `STRATEGY.md` ("Live execution invariants" and "Features") for the mechanics.
 - `freqtrade_live/backtest_live_window.py` is the artifact-aware replay tool to use when checking live parity instead of only offline signal PnL.
 - The backtest alpha factor is a 1-day rolling z-score of the trading signal per symbol (min 60 minutes, both scaled to bars), scaled by 0.01 and averaged by timestamp for plotting.
 - A full code/parity review with measured live-vs-replay numbers (June 2026) lives in `REVIEW_FINDINGS.md`.

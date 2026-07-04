@@ -15,6 +15,7 @@ import json
 import math
 import re
 import subprocess
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional
@@ -23,6 +24,9 @@ import requests
 from requests.auth import HTTPBasicAuth
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPT_DIR.parent))
+
+from src.utils import bars_per_year
 CONFIG_PATH = SCRIPT_DIR / "user_data" / "config.json"
 
 TIMEOUT = 3  # seconds
@@ -405,8 +409,7 @@ def calculate_annualized_sharpe(
     var = (total_sq - n * mean * mean) / (n - 1)
     if var <= 0:
         return None
-    bars_per_year = 365.25 * 24 * 60 / tf_min
-    return mean / math.sqrt(var) * math.sqrt(bars_per_year)
+    return mean / math.sqrt(var) * math.sqrt(bars_per_year(tf_min))
 
 
 def days_since_first_trade(first_trade_timestamp_ms: Optional[int]) -> Optional[int]:

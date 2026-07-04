@@ -11,6 +11,11 @@ artifact replay, and CLI backtest all consume that same contract by default.
 
 ## Current Deployed Contract
 
+This table is the single documented snapshot of the deployed contract; the
+authoritative source is the published `model_info.json`
+(`freqtrade_live/shared/models/`), with defaults defined in
+`src/strategy_contract.py`. Other docs link here instead of restating values.
+
 | Parameter | Value |
 |-----------|-------|
 | Interval | `15m` |
@@ -26,7 +31,7 @@ artifact replay, and CLI backtest all consume that same contract by default.
 | Direction | `high` |
 | Stoploss | `-20%` |
 | Quantile method | `rolling` |
-| Fee assumption | `0.05%` per transition |
+| Fee assumption | `0.03%` per transition |
 
 ## Model Objective
 

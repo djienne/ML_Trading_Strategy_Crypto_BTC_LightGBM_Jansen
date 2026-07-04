@@ -6,7 +6,7 @@ import pandas as pd
 
 from src.evaluation import add_quantile_labels
 from src.signal_engine import compute_desired_position, compute_prediction_quantiles
-from src.utils import estimate_bar_minutes, get_symbol_key, get_time_index, interval_to_minutes, resolve_quantile_scope
+from src.utils import bars_per_year, estimate_bar_minutes, get_symbol_key, get_time_index, interval_to_minutes, resolve_quantile_scope
 
 try:
     from numba import njit as _njit
@@ -150,8 +150,8 @@ def compute_signal_returns(pred_series, target_series, timestamps,
     total_gross = float(np.prod(1 + gross) - 1)
     total_net = float(np.prod(1 + net) - 1)
     ns = float(net.std())
-    bars_per_year = 525600 / interval_to_minutes(interval)
-    sharpe = float(net.mean() / ns * bars_per_year ** 0.5) if ns > 0 else 0.0
+    annual_bars = bars_per_year(interval_to_minutes(interval))
+    sharpe = float(net.mean() / ns * annual_bars ** 0.5) if ns > 0 else 0.0
 
     return dict(trades=total_trades, gross=total_gross, net=total_net, sharpe=sharpe,
                 valid_mask=valid_mask, signal=sig, quantiles=quantiles,
@@ -525,8 +525,8 @@ def backtest(
         interval_minutes = estimate_bar_minutes(predictions.index) or interval_to_minutes(interval)
     else:
         interval_minutes = interval_to_minutes(interval)
-    bars_per_year = 525600 / interval_minutes
-    annual_sharpe = bar_sharpe * (bars_per_year**0.5)
+    annual_bars = bars_per_year(interval_minutes)
+    annual_sharpe = bar_sharpe * (annual_bars**0.5)
 
     print("-" * 30)
     print(f"Backtest Results ({minute_perf.index.min()} to {minute_perf.index.max()})")

@@ -214,6 +214,15 @@ def format_volume_size(value):
     return text.replace(".", "p")
 
 
+MINUTES_PER_YEAR = 525600  # 365-day year
+
+
+def bars_per_year(interval_minutes):
+    """Annualization basis shared by the vectorized backtest and the live
+    PnL monitor, so their Sharpe numbers stay directly comparable."""
+    return MINUTES_PER_YEAR / interval_minutes
+
+
 def interval_to_minutes(interval):
     if not interval:
         raise ValueError("Interval is required.")

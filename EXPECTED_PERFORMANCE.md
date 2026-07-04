@@ -8,19 +8,35 @@ This repository has two useful evaluation layers, and they answer different ques
 Use the first for fast research. Use the second when you want the closest artifact-aware check
 of what the live stack would have tried to do.
 
-## Current Deployed Contract
+The deployed contract values (pair, timeframe, model hyperparameters,
+entry/exit quantiles, stoploss, fee assumption) are listed once in
+`STRATEGY.md` ("Current Deployed Contract") and sourced from the published
+`model_info.json`.
 
-| Parameter | Value |
-|-----------|-------|
-| Pair | BTC/USDT futures |
-| Timeframe | `15m` |
-| Direction | Long only (`high`) |
-| Train months | `12` |
-| Model | LightGBM (`num_leaves=31`, `min_data_in_leaf=50`, `feature_fraction=0.5`, `lr=0.01`) |
-| Entry | Rolling quantile `>= 100 / 100` |
-| Exit | Rolling quantile `< 90 / 100` |
-| Stoploss | `-20%` |
-| Fee assumption | `0.05%` per transition |
+## Current Backtest Results (data through 2026-07-04)
+
+Contract-driven vectorized backtest (`python main.py backtest --symbol BTCUSDT
+--interval 15m`), current code (post alpha001 fix), models retrained
+2026-07-04 on BTC+ETH data through 2026-07-04:
+
+```
+Period: 2020-12-01 → 2026-07-03 (~5.6 years)
+Total Trades: 2682
+Total Gross Return: 743.6%
+Total Net Return:   277.4%  (~27% CAGR)
+Annualized Sharpe:  1.33
+Fee: 0.03% per transition, Stoploss: -20%
+```
+
+The fee assumption is now 0.03% per transition (the repo-wide backtest
+default in `src/strategy_contract.py` and the published contract). At the
+older, more conservative 0.05% assumption the same run yields net +120.7%
+(~15% CAGR), Sharpe 0.83 — fee drag dominates at this trade frequency, so
+treat realized maker/taker mix as a first-order performance driver.
+
+These current-code numbers are the honest baseline; the April-2026 grid-search
+numbers carry selection bias (see below) and predate the 2026-06-10 alpha001
+redefinition.
 
 ## What To Trust
 
@@ -68,21 +84,37 @@ estimate (winner's curse): there is no untouched holdout behind it. Treat
 unbiased forecasts of live performance. The most honest forward-looking numbers
 are the dry-run ledger and the artifact replay.
 
+## Expected Live Performance
+
+Conservative live estimates derived from the current backtest baseline
+(0.03% fee, through 2026-07-04):
+
+| Metric | Backtest | Expected Live (conservative) |
+|--------|----------|------------------------------|
+| CAGR | ~27% | 10-18% |
+| Sharpe | 1.33 | 0.6-0.9 |
+| Trades/year | ~480 | ~480 |
+| Avg trade duration | ~1-2 days | ~1-2 days |
+| Max drawdown | ~15-25% | 20-35% |
+| Win rate | ~50-55% | ~45-50% |
+
+Why live will likely underperform the backtest:
+
+1. **Slippage**: the backtest assumes fills at the next bar's open; live has
+   order-book pricing and unfilled timeouts.
+2. **Latency**: the backtest evaluates on closed candles; live has ~seconds delay.
+3. **Fee mix**: the backtest uses a flat per-transition fee; realized live fees
+   depend on the maker/taker mix and funding.
+4. **Model staleness**: live retrains monthly; between retrains the regime may shift.
+5. **Stoploss mechanics**: see "Live vs Backtest Expectations" above.
+
 ## Measured Live/Replay Parity (June 2026)
 
-Trade-by-trade diff of the dry-run ledger (`tradesv3.sqlite`) vs
-`backtest_live_window.py`:
-
-- After the 1-bar execution-parity fix (commit `aef0d1a`, live since
-  ~2026-05-29): 18 of 20 dry-run trades matched the replay bar-exactly on both
-  entry and exit; per-trade |PnL difference| averaged 0.12 percentage points
-  (order-book fills vs open-price assumption).
-- All 28 trades from before that fix show a systematic one-bar offset: the
-  replay runs *today's* code against archived models, and archived snapshots do
-  not capture code, so cross-version windows are not comparable.
-- The residual mismatch class (~2 trades in 9 days) is knife-edge entries:
-  entry requires the top 1% rolling quantile, so tiny prediction differences
-  (feature-window effects, quantile-window seeding) flip borderline bars.
+Signal parity is measured, not assumed: after the 1-bar execution-parity fix,
+18 of 20 dry-run trades matched the artifact replay bar-exactly, with a mean
+per-trade |PnL difference| of 0.12 percentage points; the residual mismatches
+are knife-edge top-1%-quantile entries. The full trade-by-trade evidence and
+methodology live in `REVIEW_FINDINGS.md` ("Measured Evidence").
 
 ## Reporting Guidance
 

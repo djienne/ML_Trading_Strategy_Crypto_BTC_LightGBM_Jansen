@@ -18,6 +18,7 @@ from src.features import engineer_features, prepare_target
 from src.modeling import train_and_predict
 from src.utils import get_time_index, get_symbol_key, get_train_symbols, resolve_bar_type, resolve_feature_flags
 from src.backtest import score_hysteresis_predictions
+from src.strategy_contract import DEFAULT_FEE_ASSUMPTION, DEFAULT_STOPLOSS
 from src.utils import interval_to_minutes
 
 # Load unified config
@@ -32,8 +33,8 @@ BAR_TYPE = resolve_bar_type(config)
 # Fixed params
 LR = 0.01
 BOOST_ROUNDS = 5000
-FEE = 0.0005
-STOPLOSS = -0.20
+FEE = DEFAULT_FEE_ASSUMPTION
+STOPLOSS = DEFAULT_STOPLOSS
 RESULTS_CSV = "grid_search_results.csv"
 
 # Load data once

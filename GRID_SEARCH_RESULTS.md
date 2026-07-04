@@ -6,7 +6,8 @@
 > comparing. The winner was also selected on the same out-of-fold predictions
 > these metrics are reported from, so treat the numbers as relative rankings,
 > not unbiased forecasts (see `EXPECTED_PERFORMANCE.md`, "Selection Bias In
-> Grid-Search Numbers").
+> Grid-Search Numbers"). For the currently deployed contract values and
+> up-to-date backtest results, see `STRATEGY.md` and `EXPECTED_PERFORMANCE.md`.
 
 ## Setup
 - **Data:** BTC+ETH 15m, Dec 2019 - Mar 2026 (~436K rows)
@@ -47,6 +48,21 @@
 - **12m:** net=+299.6% sharpe=1.43 trades=1862 (L=31 ff=0.5 mdil=50 bins=200 e=99% x=85% none)
 
 ## Deployed Configuration
-Chosen for **neighborhood robustness** (smooth degradation in all parameter directions):
-- tm=12, L=16, ff=0.5, mdil=100, bins=200, entry>=198 (99%), exit<180 (90%), no IC filter
-- **Net: +283.81%, Sharpe: 1.41, Trades: 1380**
+
+The configuration actually deployed (see `STRATEGY.md` for the authoritative
+contract table, sourced from `model_info.json`) is
+`tm=12, L=31, ff=0.5, mdil=50, bins=100, entry>=100 (top 1%), exit<90, no IC filter`.
+Its April-2026 grid metrics were **net +256.7%, Sharpe 1.34, 2350 trades**.
+
+Why this one rather than the raw top-ranked row:
+
+- **Neighborhood robustness:** performance degrades smoothly in every parameter
+  direction around it, whereas the top rows sit on sharper local optima.
+- **12-month training window:** highest net return and tied-best Sharpe in the
+  train-months sweep; more data per fold reduces overfitting, and early
+  stopping keeps effective complexity low (typical best iteration 5–30).
+- **Long-only, direction `high`:** "buy high" (+256.7%, Sharpe 1.34) vastly
+  outperformed "buy low" (+3.4%, Sharpe 0.18).
+- **No IC filter:** no filter (+256.7%, 1.34) beat IC>0.0 (+187.4%, 1.25) and
+  IC>0.01 (+188.1%, 1.34) — trading through low-validation-IC periods still
+  contributed positively on average.

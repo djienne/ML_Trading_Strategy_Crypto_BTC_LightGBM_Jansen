@@ -3,7 +3,9 @@ models/
 plot/
 *.feather
 *.pdf
+*.log
 __pycache__/
+.pytest_cache/
 
 # Live deployment artifacts
 freqtrade_live/user_data/logs/
@@ -15,3 +17,4 @@ good_models/
 grid_search_results.csv
 grid_search_output.log
 grid_search_resume.log
+ai_bundles/

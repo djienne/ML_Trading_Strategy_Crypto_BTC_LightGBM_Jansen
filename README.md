@@ -2,14 +2,14 @@
 
 This repo implements a modular ML trading strategy workflow inspired by the Chapter 12 of "Machine Learning for Algorithmic Trading" by Stefan Jansen. The pipeline is split into independent stages so you can run only what you need: download data, build features, train models (with persistence), evaluate signals, and backtest a chosen quantile.
 
+**Associated YouTube video:** [Watch on YouTube](https://youtu.be/f4HoOeE3-Zk)
+
 The pipeline supports any candle interval shorter than 1 month (e.g., 1m, 5m, 1h, 1d). The currently deployed live setup (`config.json`, `freqtrade_live/`) trades BTC/USDT futures on 15-minute candles; the plots below come from the deployed 15m contract, backtested on data through 2026-07-04 (net +277.4%, Sharpe 1.33 at the 0.03% fee assumption — see `EXPECTED_PERFORMANCE.md`). For short timeframes (e.g., 1m/5m), profitability is only realistic with very low fees (below 0.5 bps); this is generally not achievable for taker trading, but the short-term signal could be used, for example, as alpha for a high frequency market-making model that relies on limit maker orders (very low fees, sometimes rebates).
 
 <figure>
   <img src="plot/ALL_15m_equity_q100_long_high_100_rolling.png" alt="ALL 15m equity curve (deployed contract, rolling quantiles)" width="700">
   <figcaption>Equity curve for the deployed 15m contract (data through 2026-07-04).</figcaption>
 </figure>
-
-**Associated YouTube video:** [Watch on YouTube](https://youtu.be/f4HoOeE3-Zk)
 
 ## Requirements
 

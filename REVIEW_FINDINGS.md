@@ -167,10 +167,20 @@ exact future diffs (including quantile knife-edge analysis).
 
 ## Deployment checklist for this change set
 
-1. `docker compose restart lgbm_retrainer` — it detects the `features.py`
+> **Historical record (June 2026) — already executed; do not re-run.** This was
+> the one-time rollout runbook for the F1/F2/F3 fixes above. It was carried out
+> in June 2026 and the stack has retrained many times since (the deployed
+> `model_info.json` training date is 2026-08-13). It is kept only as the record
+> of how that change set was rolled out. Note the ordering rule it encodes —
+> retrainer first, wait for the publish, then the trader — still applies to any
+> future `src/features.py` change. `docker compose` takes the **service** names
+> (`retrainer`, `freqtrade`); `lgbm_retrainer` / `lgbm_trader` are the container
+> names and only work with `docker logs` / `docker exec`.
+
+1. `docker compose restart retrainer` — it detects the `features.py`
    change and retrains (~15 min based on the 06-10 run).
 2. Wait for the new `current` pointer / `model_info.json` training date.
-3. `docker compose restart lgbm_trader` — picks up the new strategy code
+3. `docker compose restart freqtrade` — picks up the new strategy code
    (level signals, `startup_candle_count = 3600`; expect a one-time
    "Using 4 calls to get OHLCV" warning at startup).
 4. Confirm `user_data/logs/signal_state.csv` starts appending one row per

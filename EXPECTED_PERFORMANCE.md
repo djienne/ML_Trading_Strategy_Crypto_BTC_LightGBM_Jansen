@@ -28,6 +28,15 @@ Annualized Sharpe:  1.33
 Fee: 0.03% per transition, Stoploss: -20%
 ```
 
+> **These numbers predate the deployed model.** The model actually running is
+> the one published in `freqtrade_live/shared/models/model_info.json`, whose
+> `training_date` is **2026-08-13T21:19:40Z** — about six weeks after the
+> 2026-07-04 data cut-off above. The block is therefore a record of the
+> 2026-07-04 artifact, not of what is trading today, and the "What To Trust"
+> rule below (treat old hand-written summary metrics as stale unless
+> regenerated from the current artifact) applies to it. Regenerate before
+> quoting these figures as the deployed model's performance.
+
 The fee assumption is now 0.03% per transition (the repo-wide backtest
 default in `src/strategy_contract.py` and the published contract). At the
 older, more conservative 0.05% assumption the same run yields net +120.7%

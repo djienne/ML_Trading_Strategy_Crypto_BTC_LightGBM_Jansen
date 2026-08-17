@@ -17,7 +17,7 @@ The parent `boosting_strategy_LightGBM/` is the **research/backtest** side (data
 | Timeframe | `15m` (from the strategy; `startup_candle_count = 3600`, `can_short = False`) |
 | Mode / pair | `futures`, `isolated`, `BTC/USDT:USDT`, `StaticPairList`, `max_open_trades: 1` |
 | API port | `127.0.0.1:8080:8080` |
-| Limits | trader `mem_limit: 2g`, retrainer `mem_limit: 4g`; `cpus: 0.25` both |
+| Limits | trader `mem_limit: 2g`, retrainer `mem_limit: 4g`; `cpus: 0.1` both |
 | Image tag | none — compose builds unnamed, no `ft-freqtrade_live:2025.10` |
 | Extra mounts | `../src:ro` in both; `../download_data.py:ro` and `../data/feather` in the retrainer |
 
@@ -47,5 +47,5 @@ docker compose restart retrainer
 - **No `commands.txt`** here (unlike ~50 other bots in the fleet) and **no `Dockerfile.technical`** — the trader image is `Dockerfile.freqtrade`. `Dockerfile.freqtrade.bak` and `user_data/config.json.bak` are leftovers, not live.
 - `retrainer/retrain.py` is baked into the image *and* bind-mounted read-only: code edits need a service restart, not a rebuild. The trader appends one row per 15m candle to `user_data/logs/signal_state.csv`; a stalled file means the strategy is not producing decisions.
 
-Fleet defaults apply (binance, dry-run, 0.25 CPU / 512M, `ft-<folder>:2025.10`); only deviations are listed above.
+Fleet defaults apply (binance, dry-run, 0.1 CPU / 512M, `ft-<folder>:2025.10`); only deviations are listed above.
 <!-- ft-facts: container=lgbm_trader strategy=LightGBMStrategy file=user_data/strategies/LightGBMStrategy.py port=8080 tf=15m mode=futures -->

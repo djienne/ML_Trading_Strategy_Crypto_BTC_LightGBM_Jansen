@@ -1,6 +1,9 @@
 
 services:
   freqtrade:
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     build:
       context: .
       dockerfile: Dockerfile.freqtrade
@@ -30,6 +33,9 @@ services:
       --strategy LightGBMStrategy
 
   retrainer:
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     build:
       context: .
       dockerfile: Dockerfile.retrainer
